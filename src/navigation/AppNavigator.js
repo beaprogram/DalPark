@@ -7,10 +7,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { auth } from '../config/firebase';
 import { DalTheme } from '../utils/theme';
 
-import LoginScreen from '../screens/LoginScreen';
-import MapScreen from '../screens/MapScreen';
-import HistoryScreen from '../screens/HistoryScreen';
-import SettingsScreen from '../screens/SettingsScreen';
+import LoginScreen from '../screens/LoginScreen.js';
+import MapScreen from '../screens/MapScreen.js';
+import HistoryScreen from '../screens/HistoryScreen.js';
+import SettingsScreen from '../screens/SettingsScreen.js';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
