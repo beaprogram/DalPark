@@ -9,58 +9,16 @@ import { appTheme, componentMetrics } from '../theme/tokens';
 import LotBottomSheet from '../components/map/LotBottomSheet';
 import { PARKING_LOTS } from '../data/parkingLots';
 import { openNavigationToCoordinate } from '../utils/navigation';
+import { fetchParkingZones } from '../utils/hrmApi';
+import { predictAvailability, blendWithCrowdsource, scoreToStatus } from '../utils/engine';
+import ReportModal from '../components/map/ReportModal';
 
 const INITIAL_REGION = {
-  latitude: 44.6383,
-  longitude: -63.5859,
-  latitudeDelta: 0.08,
-  longitudeDelta: 0.06,
+  latitude: 44.648,
+  longitude: -63.575,
+  latitudeDelta: 0.06,
+  longitudeDelta: 0.05,
 };
-
-const CAMPUS_STYLE = {
-  sexton: {
-    strokeColor: '#2F80ED',
-    fillColor: 'rgba(47, 128, 237, 0.14)',
-    label: 'Sexton',
-  },
-  studley: {
-    strokeColor: '#F2C94C',
-    fillColor: 'rgba(242, 201, 76, 0.16)',
-    label: 'Studley',
-  },
-};
-
-const STUDLEY_POLYGON = [
-  { latitude: 44.63765, longitude: -63.59663 },
-  { latitude: 44.63956, longitude: -63.58881 },
-  { latitude: 44.63847, longitude: -63.58828 },
-  { latitude: 44.63897, longitude: -63.58619 },
-  { latitude: 44.63801, longitude: -63.58572 },
-  { latitude: 44.63786, longitude: -63.58623 },
-  { latitude: 44.63701, longitude: -63.58586 },
-  { latitude: 44.63657, longitude: -63.58731 },
-  { latitude: 44.63606, longitude: -63.58707 },
-  { latitude: 44.63528, longitude: -63.59026 },
-  { latitude: 44.63404, longitude: -63.58972 },
-  { latitude: 44.63323, longitude: -63.59317 },
-  { latitude: 44.6345, longitude: -63.59379 },
-  { latitude: 44.63424, longitude: -63.59518 },
-];
-
-const SEXTON_POLYGON = [
-  { latitude: 44.64088, longitude: -63.57472 },
-  { latitude: 44.64226, longitude: -63.57545 },
-  { latitude: 44.64253, longitude: -63.57467 },
-  { latitude: 44.6435, longitude: -63.57509 },
-  { latitude: 44.6437, longitude: -63.57438 },
-  { latitude: 44.64342, longitude: -63.57416 },
-  { latitude: 44.64345, longitude: -63.57392 },
-  { latitude: 44.64326, longitude: -63.5738 },
-  { latitude: 44.64348, longitude: -63.57309 },
-  { latitude: 44.64309, longitude: -63.57288 },
-  { latitude: 44.64329, longitude: -63.5721 },
-  { latitude: 44.64176, longitude: -63.57131 },
-];
 
 const WEATHER_FALLBACK_COORDINATE = {
   latitude: 44.6488,
@@ -92,21 +50,6 @@ const mapWeatherCode = (code) => {
   return { text: 'Weather', icon: 'partly-sunny-outline' };
 };
 
-const polygonCentroid = (points) => {
-  const sum = points.reduce(
-    (acc, point) => ({
-      latitude: acc.latitude + point.latitude,
-      longitude: acc.longitude + point.longitude,
-    }),
-    { latitude: 0, longitude: 0 }
-  );
-
-  return {
-    latitude: sum.latitude / points.length,
-    longitude: sum.longitude / points.length,
-  };
-};
-
 const toRadians = (value) => (value * Math.PI) / 180;
 
 const distanceMeters = (from, to) => {
@@ -132,6 +75,10 @@ export default function MapScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [isLotListVisible, setIsLotListVisible] = useState(true);
   const [userCoordinate, setUserCoordinate] = useState(null);
+  const [parkingZones, setParkingZones] = useState([]);
+  const [weatherCode, setWeatherCode] = useState(null);
+  const [reportModalVisible, setReportModalVisible] = useState(false);
+  const [crowdsourceReports, setCrowdsourceReports] = useState({});
   const [weather, setWeather] = useState({
     label: 'Loading weather...',
     icon: 'cloudy-outline',
@@ -159,9 +106,9 @@ export default function MapScreen() {
     const sortedLots = [...PARKING_LOTS].sort((left, right) => left.name.localeCompare(right.name));
     const filteredLots = normalizedSearchQuery
       ? sortedLots.filter((lot) => {
-          const target = `${lot.name} ${lot.address} ${lot.campus}`.toLowerCase();
-          return target.includes(normalizedSearchQuery);
-        })
+        const target = `${lot.name} ${lot.address} ${lot.campus}`.toLowerCase();
+        return target.includes(normalizedSearchQuery);
+      })
       : sortedLots;
 
     if (!nearestLot) {
@@ -181,40 +128,22 @@ export default function MapScreen() {
 
   const zoomDelta = Math.max(mapRegion.latitudeDelta, mapRegion.longitudeDelta);
   const hideParkingMarkersWhenZoomedOut = zoomDelta > 0.022;
-  const showCampusLabels = zoomDelta >= 0.028;
-  const campusOverlays = useMemo(() => {
-    const grouped = PARKING_LOTS.reduce((acc, lot) => {
-      if (!acc[lot.campus]) {
-        acc[lot.campus] = [];
+  const showZoneLabels = zoomDelta >= 0.028;
+
+  const lotPredictions = useMemo(() => {
+    const predictions = {};
+    PARKING_LOTS.forEach((lot) => {
+      const base = predictAvailability({ lot, weatherCode });
+      const report = crowdsourceReports[lot.id];
+      if (report) {
+        const blended = blendWithCrowdsource(base.score, report);
+        predictions[lot.id] = { score: blended, status: scoreToStatus(blended) };
+      } else {
+        predictions[lot.id] = base;
       }
-      acc[lot.campus].push(lot.coordinate);
-      return acc;
-    }, {});
-
-    return Object.entries(grouped)
-      .map(([campus, coordinates]) => {
-        let polygon;
-        if (campus === 'studley') {
-          polygon = STUDLEY_POLYGON;
-        } else if (campus === 'sexton') {
-          polygon = SEXTON_POLYGON;
-        } else {
-          polygon = coordinates;
-        }
-
-        if (!polygon || polygon.length < 3) {
-          return null;
-        }
-
-        return {
-          campus,
-          polygon,
-          centroid: polygonCentroid(polygon),
-          style: CAMPUS_STYLE[campus] || CAMPUS_STYLE.studley,
-        };
-      })
-      .filter(Boolean);
-  }, []);
+    });
+    return predictions;
+  }, [weatherCode, crowdsourceReports]);
 
   const loadWeather = async () => {
     try {
@@ -250,6 +179,7 @@ export default function MapScreen() {
       const temperatureText = typeof temperature === 'number' ? `${Math.round(temperature)}C` : '--';
 
       setWeather({ label, icon: weatherMeta.icon, temperature: temperatureText });
+      setWeatherCode(weatherCode);
       return true;
     } catch (_error) {
       setWeather({
@@ -271,6 +201,9 @@ export default function MapScreen() {
 
   useEffect(() => {
     loadWeather();
+    fetchParkingZones()
+      .then(setParkingZones)
+      .catch(() => { });
   }, []);
 
   const handleRefresh = async () => {
@@ -304,10 +237,15 @@ export default function MapScreen() {
   };
 
   const handleReport = () => {
-    if (!selectedLot) {
-      return;
-    }
-    Alert.alert('Status Report', `Report flow for ${selectedLot.name} will open here.`);
+    if (!selectedLot) return;
+    setReportModalVisible(true);
+  };
+
+  const handleReported = (reportData) => {
+    setCrowdsourceReports((prev) => ({
+      ...prev,
+      [reportData.lotId]: reportData,
+    }));
   };
 
   const handleSelectLot = (lot) => {
@@ -358,32 +296,32 @@ export default function MapScreen() {
         showsUserLocation
         style={styles.map}
       >
-        {campusOverlays.map((overlay) => (
+        {parkingZones.map((zone) => (
           <Polygon
-            coordinates={overlay.polygon}
-            fillColor={overlay.style.fillColor}
-            key={`${overlay.campus}-polygon`}
-            strokeColor={overlay.style.strokeColor}
+            coordinates={zone.polygon}
+            fillColor={zone.fillColor}
+            key={`zone-${zone.id}`}
+            strokeColor={zone.strokeColor}
             strokeWidth={2}
             tappable={false}
             zIndex={1}
           />
         ))}
 
-        {showCampusLabels
-          ? campusOverlays.map((overlay) => (
-              <Marker
-                anchor={{ x: 0.5, y: 0.5 }}
-                coordinate={overlay.centroid}
-                key={`${overlay.campus}-label`}
-                tracksViewChanges={false}
-                tappable={false}
-              >
-                <View pointerEvents="none" style={styles.campusLabel}>
-                  <Text style={styles.campusLabelText}>{overlay.style.label} Campus</Text>
-                </View>
-              </Marker>
-            ))
+        {showZoneLabels
+          ? parkingZones.map((zone) => (
+            <Marker
+              anchor={{ x: 0.5, y: 0.5 }}
+              coordinate={zone.centroid}
+              key={`zone-label-${zone.id}`}
+              tracksViewChanges={false}
+              tappable={false}
+            >
+              <View pointerEvents="none" style={styles.campusLabel}>
+                <Text style={styles.campusLabelText}>{zone.name}</Text>
+              </View>
+            </Marker>
+          ))
           : null}
 
         {selectedLot ? (
@@ -419,7 +357,7 @@ export default function MapScreen() {
                 style={[
                   styles.parkingMarker,
                   isSelected && styles.parkingMarkerSelected,
-                  { backgroundColor: STATUS_META[lot.lastStatus].color },
+                  { backgroundColor: STATUS_META[lotPredictions[lot.id]?.status || lot.lastStatus].color },
                 ]}
               >
                 <MaterialCommunityIcons
@@ -554,12 +492,20 @@ export default function MapScreen() {
       >
         <LotBottomSheet
           lot={selectedLot}
+          predictedStatus={selectedLot ? lotPredictions[selectedLot.id] : null}
           onClose={() => setSelectedLot(null)}
           onNavigate={handleNavigate}
           onReport={handleReport}
           visible={Boolean(selectedLot)}
         />
       </Animated.View>
+
+      <ReportModal
+        visible={reportModalVisible}
+        lot={selectedLot}
+        onClose={() => setReportModalVisible(false)}
+        onReported={handleReported}
+      />
     </View>
   );
 }

@@ -20,9 +20,9 @@ function MainTabs() {
     <Tab.Navigator initialRouteName='Map'
       screenOptions={({ route }) => ({
         headerShown: false,
-        tabBarStyle: { 
-          backgroundColor: DalTheme.inputBox, 
-          borderTopWidth: 0 
+        tabBarStyle: {
+          backgroundColor: DalTheme.inputBox,
+          borderTopWidth: 0,
         },
         tabBarActiveTintColor: DalTheme.dalGold,
         tabBarInactiveTintColor: DalTheme.fadedGrey,
@@ -39,8 +39,8 @@ function MainTabs() {
         },
       })}
     >
-      <Tab.Screen name="History" component={HistoryScreen}/>
       <Tab.Screen name="Map" component={MapScreen} />
+      <Tab.Screen name="History" component={HistoryScreen} />
       <Tab.Screen name="Settings" component={SettingsScreen} />
     </Tab.Navigator>
   );
