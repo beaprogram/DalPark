@@ -11,14 +11,18 @@ const formatUpdatedAt = (timestamp) => {
   return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 };
 
-export default function LotBottomSheet({ visible, lot, onClose, onNavigate, onReport }) {
+export default function LotBottomSheet({ visible, lot, predictedStatus, onClose, onNavigate, onReport }) {
   if (!visible || !lot) {
     return null;
   }
 
-  const statusMeta = STATUS_META[lot.lastStatus];
+  const status = predictedStatus?.status || lot.lastStatus;
+  const statusMeta = STATUS_META[status];
   const dayTotal = (lot.generalSpaces || 0) + (lot.reservedSpaces || 0) + (lot.shortTermSpaces || 0);
   const eveningTotal = (lot.eveningGeneralSpaces || 0) + (lot.eveningShortTermSpaces || 0);
+  const pct = (predictedStatus?.score ?? 50) / 100;
+  const dayEst = Math.round(dayTotal * pct);
+  const eveEst = Math.round(eveningTotal * pct);
 
   return (
     <View style={styles.container}>
@@ -49,11 +53,11 @@ export default function LotBottomSheet({ visible, lot, onClose, onNavigate, onRe
       <View style={styles.infoGrid}>
         <View style={styles.infoItem}>
           <Text style={styles.infoLabel}>Day Total</Text>
-          <Text style={styles.infoValue}>{dayTotal}</Text>
+          <Text style={styles.infoValue}>~{dayEst}/{dayTotal}</Text>
         </View>
         <View style={styles.infoItem}>
           <Text style={styles.infoLabel}>Evening Total</Text>
-          <Text style={styles.infoValue}>{eveningTotal}</Text>
+          <Text style={styles.infoValue}>~{eveEst}/{eveningTotal}</Text>
         </View>
       </View>
 
