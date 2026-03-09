@@ -7,8 +7,15 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { STATUS_META } from '../constants/statusStyle';
 import { appTheme, componentMetrics } from '../theme/tokens';
 import LotBottomSheet from '../components/map/LotBottomSheet';
-import { PARKING_LOTS } from '../data/parkingLots';
+import { subscribeLots } from '../utils/lotsFirestore';
 import { openNavigationToCoordinate } from '../utils/navigation';
+import {
+  loadMapPreferences,
+  saveLotListVisible,
+  saveMapRegion,
+  saveSearchQuery,
+  saveSelectedLotId,
+} from '../utils/mapPreferencesStorage';
 
 const INITIAL_REGION = {
   latitude: 44.6383,
@@ -30,6 +37,7 @@ const CAMPUS_STYLE = {
   },
 };
 
+// campus boundaries for simple 2D overlays.
 const STUDLEY_POLYGON = [
   { latitude: 44.63765, longitude: -63.59663 },
   { latitude: 44.63956, longitude: -63.58881 },
@@ -47,6 +55,7 @@ const STUDLEY_POLYGON = [
   { latitude: 44.63424, longitude: -63.59518 },
 ];
 
+// campus boundaries for simple 2D overlays.
 const SEXTON_POLYGON = [
   { latitude: 44.64088, longitude: -63.57472 },
   { latitude: 44.64226, longitude: -63.57545 },
@@ -67,6 +76,7 @@ const WEATHER_FALLBACK_COORDINATE = {
   longitude: -63.5752,
 };
 
+// Map open-meteo weather code into short UI text + icon.
 const mapWeatherCode = (code) => {
   if (code === 0) {
     return { text: 'Clear', icon: 'sunny-outline' };
@@ -109,6 +119,7 @@ const polygonCentroid = (points) => {
 
 const toRadians = (value) => (value * Math.PI) / 180;
 
+// Small haversine helper, good enough for nearby lot sorting.
 const distanceMeters = (from, to) => {
   const earthRadiusMeters = 6371000;
   const dLat = toRadians(to.latitude - from.latitude);
@@ -126,7 +137,10 @@ const distanceMeters = (from, to) => {
 export default function MapScreen() {
   const insets = useSafeAreaInsets();
   const mapRef = useRef(null);
-  const [selectedLot, setSelectedLot] = useState(PARKING_LOTS[0]);
+  const hasHydratedPreferences = useRef(false);
+  const [lots, setLots] = useState([]);
+  const [selectedLot, setSelectedLot] = useState(null);
+  const [restoredSelectedLotId, setRestoredSelectedLotId] = useState(null);
   const [mapRegion, setMapRegion] = useState(INITIAL_REGION);
   const sheetProgress = useRef(new Animated.Value(0)).current;
   const [searchQuery, setSearchQuery] = useState('');
@@ -139,12 +153,77 @@ export default function MapScreen() {
   });
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
 
+  useEffect(() => {
+    // Lots now come from Firestore with local fallback in service.
+    const unsubscribe = subscribeLots((nextLots) => {
+      setLots(nextLots);
+      setSelectedLot((currentLot) => {
+        if (!currentLot) {
+          return currentLot;
+        }
+        return nextLots.find((lot) => lot.id === currentLot.id) || null;
+      });
+    });
+
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    // Restore the last map state on app open.
+    let isActive = true;
+
+    const hydratePreferences = async () => {
+      const preferences = await loadMapPreferences();
+      if (!isActive) {
+        return;
+      }
+
+      if (preferences.mapRegion) {
+        setMapRegion(preferences.mapRegion);
+        requestAnimationFrame(() => {
+          mapRef.current?.animateToRegion(preferences.mapRegion, 0);
+        });
+      }
+
+      if (preferences.searchQuery) {
+        setSearchQuery(preferences.searchQuery);
+      }
+
+      if (typeof preferences.lotListVisible === 'boolean') {
+        setIsLotListVisible(preferences.lotListVisible);
+      }
+
+      if (preferences.selectedLotId) {
+        setRestoredSelectedLotId(preferences.selectedLotId);
+      }
+
+      hasHydratedPreferences.current = true;
+    };
+
+    void hydratePreferences();
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!restoredSelectedLotId || lots.length === 0) {
+      return;
+    }
+
+    const restoredLot = lots.find((lot) => lot.id === restoredSelectedLotId) || null;
+    setSelectedLot(restoredLot);
+    setRestoredSelectedLotId(null);
+  }, [lots, restoredSelectedLotId]);
+
   const nearestLot = useMemo(() => {
-    if (!userCoordinate || PARKING_LOTS.length === 0) {
+    if (!userCoordinate || lots.length === 0) {
       return null;
     }
 
-    return PARKING_LOTS.reduce((currentNearest, lot) => {
+    // Pick the closest lot from current user location.
+    return lots.reduce((currentNearest, lot) => {
       if (!currentNearest) {
         return lot;
       }
@@ -153,10 +232,11 @@ export default function MapScreen() {
       const nextDistance = distanceMeters(userCoordinate, lot.coordinate);
       return nextDistance < currentDistance ? lot : currentNearest;
     }, null);
-  }, [userCoordinate]);
+  }, [userCoordinate, lots]);
 
   const searchableLots = useMemo(() => {
-    const sortedLots = [...PARKING_LOTS].sort((left, right) => left.name.localeCompare(right.name));
+    // Base list: alphabetical. If user typed text, apply filtering.
+    const sortedLots = [...lots].sort((left, right) => left.name.localeCompare(right.name));
     const filteredLots = normalizedSearchQuery
       ? sortedLots.filter((lot) => {
           const target = `${lot.name} ${lot.address} ${lot.campus}`.toLowerCase();
@@ -173,17 +253,18 @@ export default function MapScreen() {
       return filteredLots;
     }
 
+    // Move nearest to top so users can tap it fast.
     const nextLots = [...filteredLots];
     const [nearestEntry] = nextLots.splice(nearestIndex, 1);
     nextLots.unshift(nearestEntry);
     return nextLots;
-  }, [nearestLot, normalizedSearchQuery]);
-
+  }, [lots, nearestLot, normalizedSearchQuery]);
   const zoomDelta = Math.max(mapRegion.latitudeDelta, mapRegion.longitudeDelta);
+  // Keep map clean when zoomed out. Show labels only when zoomed out enough.
   const hideParkingMarkersWhenZoomedOut = zoomDelta > 0.022;
   const showCampusLabels = zoomDelta >= 0.028;
   const campusOverlays = useMemo(() => {
-    const grouped = PARKING_LOTS.reduce((acc, lot) => {
+    const grouped = lots.reduce((acc, lot) => {
       if (!acc[lot.campus]) {
         acc[lot.campus] = [];
       }
@@ -214,10 +295,11 @@ export default function MapScreen() {
         };
       })
       .filter(Boolean);
-  }, []);
+  }, [lots]);
 
   const loadWeather = async () => {
     try {
+      // If location permission is denied, still show weather from Halifax fallback.
       let coordinate = WEATHER_FALLBACK_COORDINATE;
       const permission = await Location.requestForegroundPermissionsAsync();
 
@@ -262,6 +344,7 @@ export default function MapScreen() {
   };
 
   useEffect(() => {
+    // Bottom sheet slide animation.
     Animated.timing(sheetProgress, {
       toValue: selectedLot ? 1 : 0,
       duration: 220,
@@ -270,8 +353,51 @@ export default function MapScreen() {
   }, [selectedLot, sheetProgress]);
 
   useEffect(() => {
+    // Initial weather load.
     loadWeather();
   }, []);
+
+  useEffect(() => {
+    if (!hasHydratedPreferences.current) {
+      return;
+    }
+
+    // Debounce region writes while user is panning.
+    const timer = setTimeout(() => {
+      void saveMapRegion(mapRegion);
+    }, 350);
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [mapRegion]);
+
+  useEffect(() => {
+    if (!hasHydratedPreferences.current) {
+      return;
+    }
+
+    // Persist live search text.
+    void saveSearchQuery(searchQuery);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    if (!hasHydratedPreferences.current) {
+      return;
+    }
+
+    // Remember whether list is expanded or hidden.
+    void saveLotListVisible(isLotListVisible);
+  }, [isLotListVisible]);
+
+  useEffect(() => {
+    if (!hasHydratedPreferences.current) {
+      return;
+    }
+
+    // Keep last selected lot id for next launch.
+    void saveSelectedLotId(selectedLot?.id ?? null);
+  }, [selectedLot]);
 
   const handleRefresh = async () => {
     const ok = await loadWeather();
@@ -311,6 +437,7 @@ export default function MapScreen() {
   };
 
   const handleSelectLot = (lot) => {
+    // Select lot, close list, and zoom in.
     setSelectedLot(lot);
     setIsLotListVisible(false);
     mapRef.current?.animateToRegion(
@@ -397,7 +524,7 @@ export default function MapScreen() {
           />
         ) : null}
 
-        {PARKING_LOTS.map((lot) => {
+        {lots.map((lot) => {
           const isSelected = selectedLot?.id === lot.id;
           if (hideParkingMarkersWhenZoomedOut) {
             return null;
@@ -489,7 +616,7 @@ export default function MapScreen() {
             <Text style={styles.listToggleText}>
               {isLotListVisible
                 ? `Hide lots`
-                : `All lots (${searchableLots.length}/${PARKING_LOTS.length})`}
+                : `All lots (${searchableLots.length}/${lots.length})`}
             </Text>
           </Pressable>
 
@@ -749,4 +876,3 @@ const styles = StyleSheet.create({
     textShadowRadius: 2,
   },
 });
-
