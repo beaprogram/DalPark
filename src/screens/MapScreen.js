@@ -31,6 +31,7 @@ const WEATHER_FALLBACK_COORDINATE = {
   latitude: 44.6488,
   longitude: -63.5752,
 };
+const REPORT_DISTANCE_LIMIT_METERS = 30;
 
 // Map open-meteo weather code into short UI text + icon.
 const mapWeatherCode = (code) => {
@@ -179,6 +180,32 @@ export default function MapScreen() {
     }, null);
   }, [userCoordinate, lots]);
 
+  const selectedLotDistanceMeters = useMemo(() => {
+    if (!selectedLot || !userCoordinate) {
+      return null;
+    }
+    return distanceMeters(userCoordinate, selectedLot.coordinate);
+  }, [selectedLot, userCoordinate]);
+
+  const canReportSelectedLot =
+    selectedLotDistanceMeters !== null && selectedLotDistanceMeters <= REPORT_DISTANCE_LIMIT_METERS;
+
+  const reportDisabledMessage = useMemo(() => {
+    if (!selectedLot) {
+      return '';
+    }
+    if (!userCoordinate) {
+      return 'Enable location to report.';
+    }
+    if (selectedLotDistanceMeters === null) {
+      return '';
+    }
+    if (selectedLotDistanceMeters > REPORT_DISTANCE_LIMIT_METERS) {
+      return `Get closer to report (${Math.round(selectedLotDistanceMeters)}m away).`;
+    }
+    return '';
+  }, [selectedLot, userCoordinate, selectedLotDistanceMeters]);
+
   const searchableLots = useMemo(() => {
     // Base list: alphabetical. If user typed text, apply filtering.
     const sortedLots = [...lots].sort((left, right) => left.name.localeCompare(right.name));
@@ -211,18 +238,42 @@ export default function MapScreen() {
 
   const lotPredictions = useMemo(() => {
     const predictions = {};
+    const engineUpdatedAt = Date.now();
+
     lots.forEach((lot) => {
       const base = predictAvailability({ lot, weatherCode });
       const report = crowdsourceReports[lot.id];
       if (report) {
         const blended = blendWithCrowdsource(base.score, report);
-        predictions[lot.id] = { score: blended, status: scoreToStatus(blended) };
+        predictions[lot.id] = {
+          score: blended,
+          status: scoreToStatus(blended),
+          updatedAt: report.createdAt,
+          updatedBy: 'Crowd',
+        };
       } else {
-        predictions[lot.id] = base;
+        predictions[lot.id] = {
+          ...base,
+          updatedAt: engineUpdatedAt,
+          updatedBy: 'Engine',
+        };
       }
     });
     return predictions;
   }, [lots, weatherCode, crowdsourceReports]);
+
+  const selectedLotTimelineScores = useMemo(() => {
+    if (!selectedLot) {
+      return [];
+    }
+
+    const now = new Date();
+    return Array.from({ length: 24 }, (_, hour) => {
+      const targetDate = new Date(now);
+      targetDate.setHours(hour, 0, 0, 0);
+      return predictAvailability({ lot: selectedLot, weatherCode, atDate: targetDate }).score;
+    });
+  }, [selectedLot, weatherCode]);
 
   const loadWeather = async () => {
     try {
@@ -362,6 +413,7 @@ export default function MapScreen() {
 
   const handleReport = () => {
     if (!selectedLot) return;
+    if (!canReportSelectedLot) return;
     setReportModalVisible(true);
   };
 
@@ -419,6 +471,12 @@ export default function MapScreen() {
         showsCompass={false}
         showsPointsOfInterest={false}
         showsUserLocation
+        mapPadding={{
+          top: insets.top + 116,
+          right: componentMetrics.horizontalPadding,
+          bottom: 220,
+          left: componentMetrics.horizontalPadding,
+        }}
         style={styles.map}
       >
         {parkingZones.map((zone) => (
@@ -497,7 +555,7 @@ export default function MapScreen() {
         })}
       </MapView>
 
-      <View style={[styles.topOverlay, { paddingTop: insets.top + appTheme.spacing.xs }]}>
+      <View style={[styles.topOverlay, { paddingTop: insets.top + appTheme.spacing.md }]}>
         <View style={styles.searchBarCard}>
           <Ionicons color={appTheme.color.textSecondary} name="search-outline" size={18} />
           <TextInput
@@ -616,8 +674,11 @@ export default function MapScreen() {
         ]}
       >
         <LotBottomSheet
+          canReport={canReportSelectedLot}
           lot={selectedLot}
           predictedStatus={selectedLot ? lotPredictions[selectedLot.id] : null}
+          reportDisabledMessage={reportDisabledMessage}
+          timelineScores={selectedLotTimelineScores}
           onClose={() => setSelectedLot(null)}
           onNavigate={handleNavigate}
           onReport={handleReport}
