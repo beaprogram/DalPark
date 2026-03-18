@@ -7,10 +7,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { auth } from '../config/firebase';
 import { DalTheme } from '../utils/theme';
 
-import LoginScreen from '../screens/LoginScreen';
-import MapScreen from '../screens/MapScreen';
-import HistoryScreen from '../screens/HistoryScreen';
-import SettingsScreen from '../screens/SettingsScreen';
+import LoginScreen from '../screens/LoginScreen.js';
+import MapScreen from '../screens/MapScreen.js';
+import HistoryScreen from '../screens/HistoryScreen.js';
+import SettingsScreen from '../screens/SettingsScreen.js';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -20,9 +20,9 @@ function MainTabs() {
     <Tab.Navigator initialRouteName='Map'
       screenOptions={({ route }) => ({
         headerShown: false,
-        tabBarStyle: { 
-          backgroundColor: DalTheme.inputBox, 
-          borderTopWidth: 0 
+        tabBarStyle: {
+          backgroundColor: DalTheme.inputBox,
+          borderTopWidth: 0,
         },
         tabBarActiveTintColor: DalTheme.dalGold,
         tabBarInactiveTintColor: DalTheme.fadedGrey,
@@ -39,8 +39,8 @@ function MainTabs() {
         },
       })}
     >
-      <Tab.Screen name="History" component={HistoryScreen}/>
       <Tab.Screen name="Map" component={MapScreen} />
+      <Tab.Screen name="History" component={HistoryScreen} />
       <Tab.Screen name="Settings" component={SettingsScreen} />
     </Tab.Navigator>
   );
