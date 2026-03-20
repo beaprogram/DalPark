@@ -23,11 +23,7 @@ export default function LoginScreen() {
 
   return (
     <View style={styles.container}>
-      <Image 
-        source={require('../../assets/dal-logo.png')} 
-        style={styles.logo} 
-      />
-      <Text style={styles.headerText}>{hasAccount ? 'Login to DalParkAid' : 'Sign Up'}</Text>
+      <Text style={styles.headerText}>{hasAccount ? 'Login to HFXParkAid' : 'Sign Up'}</Text>
       
       <TextInput
         style={styles.inputField}
