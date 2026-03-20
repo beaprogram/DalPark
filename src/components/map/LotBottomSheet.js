@@ -1,5 +1,5 @@
 import React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
 import { STATUS_META } from '../../constants/statusStyle';
 import { appTheme, componentMetrics } from '../../theme/tokens';
@@ -29,6 +29,8 @@ export default function LotBottomSheet({
   canReport = true,
   reportDisabledMessage = '',
   timelineScores = [],
+  dragHandleProps = {},
+  scrollEnabled = true,
   onClose,
   onNavigate,
   onReport,
@@ -53,144 +55,165 @@ export default function LotBottomSheet({
   const updatedText = updatedAt && updatedSource ? `${updatedSource} ${formatUpdatedAt(updatedAt)}` : null;
 
   return (
-    <View style={styles.container}>
-      <View style={styles.handle} />
-      <View style={styles.headerRow}>
-        <View style={styles.headerMain}>
-          <Text numberOfLines={1} style={styles.name}>
-            {lot.name}
-          </Text>
-          <Text numberOfLines={1} style={styles.address}>
-            {lot.address}
-          </Text>
+    <View {...dragHandleProps} style={styles.container}>
+      <View style={styles.dragArea}>
+        <View style={styles.handle} />
+        <View style={styles.headerRow}>
+          <View style={styles.headerMain}>
+            <Text numberOfLines={1} style={styles.name}>
+              {lot.name}
+            </Text>
+            <Text numberOfLines={1} style={styles.address}>
+              {lot.address}
+            </Text>
+          </View>
+          <Pressable accessibilityLabel="Close lot details" onPress={onClose} style={styles.closeButton}>
+            <Text style={styles.closeText}>Close</Text>
+          </Pressable>
         </View>
-        <Pressable accessibilityLabel="Close lot details" onPress={onClose} style={styles.closeButton}>
-          <Text style={styles.closeText}>Close</Text>
-        </Pressable>
       </View>
 
-      <View style={styles.metaRow}>
-        <View style={[styles.pill, { backgroundColor: statusMeta.color }]}>
-          <Text style={styles.pillText}>{statusMeta.label}</Text>
+      <ScrollView
+        bounces={false}
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+        nestedScrollEnabled
+        scrollEnabled={scrollEnabled}
+        showsVerticalScrollIndicator
+        style={styles.scrollView}
+      >
+        <View style={styles.metaRow}>
+          <View style={[styles.pill, { backgroundColor: statusMeta.color }]}>
+            <Text style={styles.pillText}>{statusMeta.label}</Text>
+          </View>
+          {updatedText ? (
+            <View style={styles.pillMuted}>
+              <Text style={styles.pillMutedText}>Updated {updatedText}</Text>
+            </View>
+          ) : null}
         </View>
-        {updatedText ? (
-          <View style={styles.pillMuted}>
-            <Text style={styles.pillMutedText}>Updated {updatedText}</Text>
+
+        <View style={styles.scoreSection}>
+          <View style={styles.scoreHeadingRow}>
+            <Text style={styles.scoreHeading}>Predicted score</Text>
+            <Text style={styles.scoreValue}>{clampedScore}/100</Text>
+          </View>
+          <View style={styles.scoreTrack}>
+            <Svg height="10" style={StyleSheet.absoluteFill} width="100%">
+              <Defs>
+                <LinearGradient id="scoreGrad" x1="0%" x2="100%" y1="0%" y2="0%">
+                  <Stop offset="0%" stopColor={appTheme.color.status.FULL} />
+                  <Stop offset="50%" stopColor={appTheme.color.status.CROWDED} />
+                  <Stop offset="100%" stopColor={appTheme.color.status.EMPTY} />
+                </LinearGradient>
+              </Defs>
+              <Rect fill="url(#scoreGrad)" height="10" rx="5" ry="5" width="100%" x="0" y="0" />
+            </Svg>
+            <View
+              style={[
+                styles.scorePointer,
+                {
+                  left: `${clampedScore}%`,
+                  backgroundColor: scoreColor(clampedScore),
+                },
+              ]}
+            />
+          </View>
+          <View style={styles.scoreCaptionRow}>
+            <Text style={styles.scoreCaption}>Packed</Text>
+            <Text style={styles.scoreCaption}>More Available</Text>
+          </View>
+        </View>
+
+        <View style={styles.infoGrid}>
+          <View style={styles.infoItem}>
+            <Text style={styles.infoLabel}>Day Total</Text>
+            <Text style={styles.infoValue}>{dayTotal}</Text>
+            <Text style={styles.infoSubText}>
+              {eveningNow ? 'Est. available: inactive now' : `Est. available: ~${dayEst}`}
+            </Text>
+          </View>
+          <View style={styles.infoItem}>
+            <Text style={styles.infoLabel}>Evening Total</Text>
+            <Text style={styles.infoValue}>{eveningTotal}</Text>
+            <Text style={styles.infoSubText}>
+              {eveningNow ? `Est. available: ~${eveEst}` : 'Est. available: inactive now'}
+            </Text>
+          </View>
+        </View>
+        <Text style={styles.periodLine}>
+          Est. available now ({activePeriodLabel}): ~{activeEst}/{activeTotal}
+        </Text>
+
+        <Text style={styles.detailLine}>
+          General {lot.generalSpaces || 0} / Reserved {lot.reservedSpaces || 0} / Short-term {lot.shortTermSpaces || 0}
+        </Text>
+        <Text style={styles.detailLine}>
+          Evening General {lot.eveningGeneralSpaces || 0} / Evening Short-term {lot.eveningShortTermSpaces || 0}
+        </Text>
+
+        {timelineScores.length > 0 ? (
+          <View style={styles.timelineSection}>
+            <Text style={styles.timelineTitle}>24h Predicted Availability</Text>
+            <View style={styles.timelineBars}>
+              {timelineScores.map((score, index) => (
+                <View key={`timeline-${index}`} style={styles.timelineSlot}>
+                  <View
+                    style={[
+                      styles.timelineBar,
+                      {
+                        height: Math.max(6, Math.round((score / 100) * 34)),
+                        backgroundColor: scoreColor(score),
+                      },
+                    ]}
+                  />
+                </View>
+              ))}
+            </View>
+            <View style={styles.timelineLabelRow}>
+              <Text style={styles.timelineLabel}>00:00</Text>
+              <Text style={styles.timelineLabel}>12:00</Text>
+              <Text style={styles.timelineLabel}>23:00</Text>
+            </View>
           </View>
         ) : null}
-      </View>
 
-      <View style={styles.scoreSection}>
-        <View style={styles.scoreHeadingRow}>
-          <Text style={styles.scoreHeading}>Predicted score</Text>
-          <Text style={styles.scoreValue}>{clampedScore}/100</Text>
+        <View style={styles.actionRow}>
+          <PrimaryButton accessibilityLabel="Navigate to lot" label="Navigate" onPress={onNavigate} style={styles.actionPrimary} />
+          <Pressable
+            accessibilityLabel="Report lot status"
+            disabled={!canReport}
+            onPress={onReport}
+            style={[styles.actionSecondary, !canReport && styles.actionSecondaryDisabled]}
+          >
+            <Text style={styles.actionSecondaryText}>Report Status</Text>
+          </Pressable>
         </View>
-        <View style={styles.scoreTrack}>
-          <Svg height="10" style={StyleSheet.absoluteFill} width="100%">
-            <Defs>
-              <LinearGradient id="scoreGrad" x1="0%" x2="100%" y1="0%" y2="0%">
-                <Stop offset="0%" stopColor={appTheme.color.status.FULL} />
-                <Stop offset="50%" stopColor={appTheme.color.status.CROWDED} />
-                <Stop offset="100%" stopColor={appTheme.color.status.EMPTY} />
-              </LinearGradient>
-            </Defs>
-            <Rect fill="url(#scoreGrad)" height="10" rx="5" ry="5" width="100%" x="0" y="0" />
-          </Svg>
-          <View
-            style={[
-              styles.scorePointer,
-              {
-                left: `${clampedScore}%`,
-                backgroundColor: scoreColor(clampedScore),
-              },
-            ]}
-          />
-        </View>
-        <View style={styles.scoreCaptionRow}>
-          <Text style={styles.scoreCaption}>Packed</Text>
-          <Text style={styles.scoreCaption}>More Available</Text>
-        </View>
-      </View>
-
-      <View style={styles.infoGrid}>
-        <View style={styles.infoItem}>
-          <Text style={styles.infoLabel}>Day Total</Text>
-          <Text style={styles.infoValue}>{dayTotal}</Text>
-          <Text style={styles.infoSubText}>
-            {eveningNow ? 'Est. available: inactive now' : `Est. available: ~${dayEst}`}
-          </Text>
-        </View>
-        <View style={styles.infoItem}>
-          <Text style={styles.infoLabel}>Evening Total</Text>
-          <Text style={styles.infoValue}>{eveningTotal}</Text>
-          <Text style={styles.infoSubText}>
-            {eveningNow ? `Est. available: ~${eveEst}` : 'Est. available: inactive now'}
-          </Text>
-        </View>
-      </View>
-      <Text style={styles.periodLine}>
-        Est. available now ({activePeriodLabel}): ~{activeEst}/{activeTotal}
-      </Text>
-
-      <Text style={styles.detailLine}>
-        General {lot.generalSpaces || 0} / Reserved {lot.reservedSpaces || 0} / Short-term {lot.shortTermSpaces || 0}
-      </Text>
-      <Text style={styles.detailLine}>
-        Evening General {lot.eveningGeneralSpaces || 0} / Evening Short-term {lot.eveningShortTermSpaces || 0}
-      </Text>
-
-      {timelineScores.length > 0 ? (
-        <View style={styles.timelineSection}>
-          <Text style={styles.timelineTitle}>24h Predicted Availability</Text>
-          <View style={styles.timelineBars}>
-            {timelineScores.map((score, index) => (
-              <View key={`timeline-${index}`} style={styles.timelineSlot}>
-                <View
-                  style={[
-                    styles.timelineBar,
-                    {
-                      height: Math.max(6, Math.round((score / 100) * 34)),
-                      backgroundColor: scoreColor(score),
-                    },
-                  ]}
-                />
-              </View>
-            ))}
-          </View>
-          <View style={styles.timelineLabelRow}>
-            <Text style={styles.timelineLabel}>00:00</Text>
-            <Text style={styles.timelineLabel}>12:00</Text>
-            <Text style={styles.timelineLabel}>23:00</Text>
-          </View>
-        </View>
-      ) : null}
-
-      <View style={styles.actionRow}>
-        <PrimaryButton accessibilityLabel="Navigate to lot" label="Navigate" onPress={onNavigate} style={styles.actionPrimary} />
-        <Pressable
-          accessibilityLabel="Report lot status"
-          disabled={!canReport}
-          onPress={onReport}
-          style={[styles.actionSecondary, !canReport && styles.actionSecondaryDisabled]}
-        >
-          <Text style={styles.actionSecondaryText}>Report Status</Text>
-        </Pressable>
-      </View>
-      {!canReport && reportDisabledMessage ? <Text style={styles.reportHint}>{reportDisabledMessage}</Text> : null}
+        {!canReport && reportDisabledMessage ? <Text style={styles.reportHint}>{reportDisabledMessage}</Text> : null}
+      </ScrollView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
+    flex: 1,
     backgroundColor: appTheme.color.bgElevated,
     borderTopLeftRadius: appTheme.radius.xl,
     borderTopRightRadius: appTheme.radius.xl,
     borderWidth: 1,
     borderColor: appTheme.color.borderDefault,
-    paddingTop: appTheme.spacing.sm,
     paddingHorizontal: componentMetrics.horizontalPadding,
+    overflow: 'hidden',
+  },
+  scrollView: {
+    flex: 1,
+  },
+  scrollContent: {
     paddingBottom: componentMetrics.bottomSafePadding + appTheme.spacing.sm,
+  },
+  dragArea: {
+    paddingTop: appTheme.spacing.sm,
   },
   handle: {
     alignSelf: 'center',
@@ -236,6 +259,7 @@ const styles = StyleSheet.create({
   metaRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
     gap: appTheme.spacing.sm,
     marginBottom: appTheme.spacing.sm,
   },

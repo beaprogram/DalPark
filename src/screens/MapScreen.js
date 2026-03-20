@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Animated, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Animated, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from 'react-native';
 import MapView, { Circle, Marker, Polygon } from 'react-native-maps';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
@@ -78,13 +78,13 @@ const distanceMeters = (from, to) => {
 
 export default function MapScreen() {
   const insets = useSafeAreaInsets();
+  const { height: windowHeight } = useWindowDimensions();
   const mapRef = useRef(null);
   const hasHydratedPreferences = useRef(false);
   const [lots, setLots] = useState([]);
   const [selectedLot, setSelectedLot] = useState(null);
   const [restoredSelectedLotId, setRestoredSelectedLotId] = useState(null);
   const [mapRegion, setMapRegion] = useState(INITIAL_REGION);
-  const sheetProgress = useRef(new Animated.Value(0)).current;
   const [searchQuery, setSearchQuery] = useState('');
   const [isLotListVisible, setIsLotListVisible] = useState(true);
   const [userCoordinate, setUserCoordinate] = useState(null);
@@ -92,6 +92,13 @@ export default function MapScreen() {
   const [weatherCode, setWeatherCode] = useState(null);
   const [reportModalVisible, setReportModalVisible] = useState(false);
   const [crowdsourceReports, setCrowdsourceReports] = useState({});
+  const sheetMaxHeight = Math.min(windowHeight * 0.78, 560);
+  const sheetPeekHeight = Math.min(windowHeight * 0.5, 25);
+  const sheetMaxOffset = Math.max(sheetMaxHeight - sheetPeekHeight, 0);
+  const sheetHiddenOffset = sheetMaxHeight + 40;
+  const sheetTranslateY = useRef(new Animated.Value(sheetHiddenOffset)).current;
+  const sheetDragStartRef = useRef(sheetHiddenOffset);
+  const pendingSheetOffsetRef = useRef(null);
   const [weather, setWeather] = useState({
     label: 'Loading weather...',
     icon: 'cloudy-outline',
@@ -322,14 +329,33 @@ export default function MapScreen() {
     }
   };
 
-  useEffect(() => {
-    // Bottom sheet slide animation.
-    Animated.timing(sheetProgress, {
-      toValue: selectedLot ? 1 : 0,
-      duration: 220,
+  const animateSheetTo = (nextOffset) => {
+    sheetDragStartRef.current = nextOffset;
+    Animated.spring(sheetTranslateY, {
+      toValue: nextOffset,
       useNativeDriver: true,
+      damping: 24,
+      stiffness: 260,
+      mass: 0.9,
     }).start();
-  }, [selectedLot, sheetProgress]);
+  };
+
+  useEffect(() => {
+    if (!selectedLot) {
+      sheetTranslateY.setValue(sheetHiddenOffset);
+      sheetDragStartRef.current = sheetHiddenOffset;
+      pendingSheetOffsetRef.current = null;
+      return;
+    }
+
+    const nextOffset =
+      pendingSheetOffsetRef.current === null
+        ? 0
+        : Math.max(0, Math.min(sheetMaxOffset, pendingSheetOffsetRef.current));
+
+    pendingSheetOffsetRef.current = null;
+    animateSheetTo(nextOffset);
+  }, [selectedLot, sheetMaxOffset, sheetHiddenOffset, sheetTranslateY]);
 
   useEffect(() => {
     // Initial weather load.
@@ -424,9 +450,23 @@ export default function MapScreen() {
     }));
   };
 
+  const handleCloseSheet = () => {
+    pendingSheetOffsetRef.current = null;
+    setSelectedLot(null);
+  };
+
   const handleSelectLot = (lot) => {
-    // Select lot, close list, and zoom in.
-    setSelectedLot(lot);
+    // Keep the current sheet height if user switches lots without closing it.
+    if (selectedLot?.id && selectedLot.id !== lot.id) {
+      sheetTranslateY.stopAnimation((value) => {
+        pendingSheetOffsetRef.current = Math.max(0, Math.min(sheetMaxOffset, value));
+        setSelectedLot(lot);
+      });
+    } else {
+      pendingSheetOffsetRef.current = null;
+      setSelectedLot(lot);
+    }
+
     setIsLotListVisible(false);
     mapRef.current?.animateToRegion(
       {
@@ -457,6 +497,43 @@ export default function MapScreen() {
     setSearchQuery('');
   };
 
+  const sheetPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_event, gestureState) =>
+          Boolean(selectedLot) &&
+          Math.abs(gestureState.dy) > 6 &&
+          Math.abs(gestureState.dy) > Math.abs(gestureState.dx),
+        onPanResponderGrant: () => {
+          sheetTranslateY.stopAnimation((value) => {
+            sheetDragStartRef.current = value;
+          });
+        },
+        onPanResponderMove: (_event, gestureState) => {
+          const nextOffset = Math.max(
+            0,
+            Math.min(sheetMaxOffset, sheetDragStartRef.current + gestureState.dy)
+          );
+          sheetTranslateY.setValue(nextOffset);
+        },
+        onPanResponderRelease: (_event, gestureState) => {
+          const projectedOffset = Math.max(
+            0,
+            Math.min(sheetMaxOffset, sheetDragStartRef.current + gestureState.dy)
+          );
+          animateSheetTo(projectedOffset);
+        },
+        onPanResponderTerminate: (_event, gestureState) => {
+          const projectedOffset = Math.max(
+            0,
+            Math.min(sheetMaxOffset, sheetDragStartRef.current + gestureState.dy)
+          );
+          animateSheetTo(projectedOffset);
+        },
+      }),
+    [selectedLot, sheetMaxOffset]
+  );
+
   return (
     <View style={styles.container}>
       <MapView
@@ -464,7 +541,7 @@ export default function MapScreen() {
         onRegionChange={setMapRegion}
         onRegionChangeComplete={setMapRegion}
         onPress={() => {
-          setSelectedLot(null);
+          handleCloseSheet();
           setIsLotListVisible(false);
         }}
         ref={mapRef}
@@ -474,7 +551,7 @@ export default function MapScreen() {
         mapPadding={{
           top: insets.top + 116,
           right: componentMetrics.horizontalPadding,
-          bottom: 220,
+          bottom: selectedLot ? sheetPeekHeight + 24 : 32,
           left: componentMetrics.horizontalPadding,
         }}
         style={styles.map}
@@ -659,15 +736,14 @@ export default function MapScreen() {
       </View>
 
       <Animated.View
+        pointerEvents={selectedLot ? 'auto' : 'none'}
         style={[
           styles.sheetWrapper,
           {
+            height: sheetMaxHeight,
             transform: [
               {
-                translateY: sheetProgress.interpolate({
-                  inputRange: [0, 1],
-                  outputRange: [220, 0],
-                }),
+                translateY: sheetTranslateY,
               },
             ],
           },
@@ -675,11 +751,13 @@ export default function MapScreen() {
       >
         <LotBottomSheet
           canReport={canReportSelectedLot}
+          dragHandleProps={sheetPanResponder.panHandlers}
           lot={selectedLot}
           predictedStatus={selectedLot ? lotPredictions[selectedLot.id] : null}
           reportDisabledMessage={reportDisabledMessage}
+          scrollEnabled={false}
           timelineScores={selectedLotTimelineScores}
-          onClose={() => setSelectedLot(null)}
+          onClose={handleCloseSheet}
           onNavigate={handleNavigate}
           onReport={handleReport}
           visible={Boolean(selectedLot)}
