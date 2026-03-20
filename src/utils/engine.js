@@ -23,8 +23,17 @@ export const scoreToStatus = (n) => {
     return 'UNKNOWN';
 };
 
-export const predictAvailability = ({ lot, weatherCode }) => {
-    const now = new Date();
+export const isEveningTime = (date = new Date()) => date.getHours() >= 17;
+
+export const getCapacityForCurrentPeriod = (lot, date = new Date()) => {
+    if (isEveningTime(date)) {
+        return (lot.eveningGeneralSpaces || 0) + (lot.eveningShortTermSpaces || 0);
+    }
+    return (lot.generalSpaces || 0) + (lot.reservedSpaces || 0) + (lot.shortTermSpaces || 0);
+};
+
+export const predictAvailability = ({ lot, weatherCode, atDate }) => {
+    const now = atDate instanceof Date ? atDate : new Date();
     const hr = now.getHours();
     const dow = now.getDay();
 
@@ -36,7 +45,7 @@ export const predictAvailability = ({ lot, weatherCode }) => {
         pts *= 0.80;
     }
 
-    const totalSpots = (lot.generalSpaces || 0) + (lot.reservedSpaces || 0) + (lot.shortTermSpaces || 0);
+    const totalSpots = getCapacityForCurrentPeriod(lot, now);
     if (totalSpots > 100) {
         pts += 8;
     } else if (totalSpots < 20) {

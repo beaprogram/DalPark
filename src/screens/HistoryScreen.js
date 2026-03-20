@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Image, Modal, Pressable, RefreshControl, SectionList, StyleSheet, Text, View } from 'react-native';
-import { collection, query, where, getDocs } from 'firebase/firestore';
-import { db, auth } from '../config/firebase';
+import { collection, getDocs } from 'firebase/firestore';
+import { db } from '../config/firebase';
 import { appTheme, componentMetrics } from '../theme/tokens';
 
 const BUSY_TAGS = ['Full', 'Busy', 'Moderate', 'Available', 'Empty'];
@@ -31,13 +31,8 @@ export default function HistoryScreen() {
   useEffect(() => { pull(); }, []);
 
   const pull = async () => {
-    if (!auth.currentUser) { setBusy(false); return; }
     try {
-      const q = query(
-        collection(db, 'reports'),
-        where('userId', '==', auth.currentUser.uid)
-      );
-      const snap = await getDocs(q);
+      const snap = await getDocs(collection(db, 'reports'));
       const rows = snap.docs
         .map((d) => ({ id: d.id, ...d.data() }))
         .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
@@ -84,7 +79,7 @@ export default function HistoryScreen() {
 
   return (
     <View style={st.wrap}>
-      <Text style={st.heading}>Your Reports</Text>
+      <Text style={st.heading}>Community Reports</Text>
       {items.length === 0 ? (
         <View style={st.noData}>
           <Text style={st.noDataTxt}>No reports yet.</Text>
