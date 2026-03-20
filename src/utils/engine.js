@@ -18,7 +18,9 @@ export const scoreToStatus = (n) => {
     if (n > 75) return 'EMPTY';
     if (n > 50) return 'NORMAL';
     if (n > 25) return 'CROWDED';
-    return 'FULL';
+    if (n > 10) return 'ALMOST_FULL';
+    if (n >= 0) return 'FULL';
+    return 'UNKNOWN';
 };
 
 export const predictAvailability = ({ lot, weatherCode }) => {
