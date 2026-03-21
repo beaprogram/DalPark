@@ -3,8 +3,14 @@ import { Alert, Animated, PanResponder, Pressable, ScrollView, StyleSheet, Text,
 import MapView, { Circle, Marker, Polygon } from 'react-native-maps';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
+import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { STATUS_META } from '../constants/statusStyle';
+import { db } from '../config/firebase';
+import {
+  ACADEMIC_CALENDAR_SIGNALS,
+  CAMPUS_LOAD_BUCKETS,
+} from '../data/officialPredictionSignals';
 import { appTheme, componentMetrics } from '../theme/tokens';
 import LotBottomSheet from '../components/map/LotBottomSheet';
 import { subscribeLots } from '../utils/lotsFirestore';
@@ -17,7 +23,8 @@ import {
   saveSelectedLotId,
 } from '../utils/mapPreferencesStorage';
 import { fetchParkingZones } from '../utils/hrmApi';
-import { predictAvailability, blendWithCrowdsource, scoreToStatus } from '../utils/engine';
+import { predictAvailability } from '../utils/engine';
+import { resolveAcademicDayType, resolvePredictionSignals } from '../utils/predictionSignals';
 import ReportModal from '../components/map/ReportModal';
 
 const INITIAL_REGION = {
@@ -32,6 +39,16 @@ const WEATHER_FALLBACK_COORDINATE = {
   longitude: -63.5752,
 };
 const REPORT_DISTANCE_LIMIT_METERS = 30;
+const RECENT_REPORT_WINDOW_MS = 120 * 60 * 1000;
+const REPORT_HISTORY_WINDOW_MS = 42 * 24 * 60 * 60 * 1000;
+const REPORT_FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
+const PREDICTION_TICK_MS = 60 * 1000;
+const REPORTS_SUBSCRIPTION_LIMIT = 1000;
+const RECOMMENDATION_DISTANCE_WEIGHT = 0.45;
+const RECOMMENDATION_AVAILABILITY_WEIGHT = 0.45;
+const RECOMMENDATION_CONVENIENCE_WEIGHT = 0.1;
+const ISO_WITH_TIMEZONE_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+\-]\d{2}:\d{2})$/;
 
 // Map open-meteo weather code into short UI text + icon.
 const mapWeatherCode = (code) => {
@@ -76,6 +93,206 @@ const distanceMeters = (from, to) => {
   return 2 * earthRadiusMeters * Math.asin(Math.sqrt(a));
 };
 
+const STATUS_FALLBACK_SCORE = {
+  EMPTY: 86,
+  NORMAL: 64,
+  CROWDED: 42,
+  ALMOST_FULL: 22,
+  FULL: 8,
+  UNKNOWN: 50,
+};
+
+const clampToRange = (value, min, max) => Math.max(min, Math.min(max, value));
+
+const getLotRecommendationCapacity = (lot) => {
+  const daytimeCapacity =
+    Number(lot?.generalSpaces || 0) +
+    Number(lot?.shortTermSpaces || 0) +
+    Number(lot?.reservedSpaces || 0) * 0.35;
+  const eveningCapacity =
+    Number(lot?.eveningGeneralSpaces || 0) +
+    Number(lot?.eveningShortTermSpaces || 0);
+
+  return Math.max(0, daytimeCapacity, eveningCapacity);
+};
+
+const getDistanceScore = (distance) => {
+  if (!Number.isFinite(distance)) {
+    return 0;
+  }
+
+  if (distance <= 80) {
+    return 100;
+  }
+
+  if (distance <= 250) {
+    return Math.round(100 - ((distance - 80) / 170) * 28);
+  }
+
+  if (distance <= 650) {
+    return Math.round(72 - ((distance - 250) / 400) * 42);
+  }
+
+  if (distance <= 1200) {
+    return Math.round(30 - ((distance - 650) / 550) * 30);
+  }
+
+  return 0;
+};
+
+const getAvailabilityScore = (prediction, lot) => {
+  if (typeof prediction?.score === 'number' && Number.isFinite(prediction.score)) {
+    return clampToRange(Math.round(prediction.score), 0, 100);
+  }
+
+  return STATUS_FALLBACK_SCORE[lot?.lastStatus] ?? STATUS_FALLBACK_SCORE.UNKNOWN;
+};
+
+const getConvenienceScore = (lot) => {
+  const recommendationCapacity = getLotRecommendationCapacity(lot);
+  return clampToRange(Math.round((recommendationCapacity / 140) * 100), 18, 100);
+};
+
+const getRecommendationScore = ({ distance, availabilityScore, convenienceScore }) =>
+  Math.round(
+    getDistanceScore(distance) * RECOMMENDATION_DISTANCE_WEIGHT +
+      availabilityScore * RECOMMENDATION_AVAILABILITY_WEIGHT +
+      convenienceScore * RECOMMENDATION_CONVENIENCE_WEIGHT
+  );
+
+const toTimestampMs = (value) => {
+  if (value == null) {
+    return null;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (value instanceof Date) {
+    return value.getTime();
+  }
+
+  if (typeof value?.toMillis === 'function') {
+    return value.toMillis();
+  }
+
+  if (typeof value?.seconds === 'number') {
+    return value.seconds * 1000 + Math.floor((value.nanoseconds || 0) / 1e6);
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (/^\d{10,13}$/.test(trimmed)) {
+      const numericTimestamp = Number(trimmed);
+      return trimmed.length === 10 ? numericTimestamp * 1000 : numericTimestamp;
+    }
+
+    if (!ISO_WITH_TIMEZONE_RE.test(trimmed)) {
+      return null;
+    }
+
+    const parsed = Date.parse(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+};
+
+const getReportTimestampMs = (report) =>
+  toTimestampMs(report?.createdAt) ?? toTimestampMs(report?.clientCreatedAt);
+
+const reportFingerprint = (report) => {
+  const createdAt = getReportTimestampMs(report) ?? 'no-time';
+  return [
+    report?.lotId || 'no-lot',
+    report?.userId || 'no-user',
+    report?.rating || 'no-rating',
+    createdAt,
+    report?.photoUrl || report?.photoPath || report?.imgUri || '',
+  ].join('::');
+};
+
+const groupReportsByLot = (reports, nowMs) => {
+  const groupedReports = {};
+
+  reports.forEach((report) => {
+    const createdAt = getReportTimestampMs(report);
+    if (!createdAt) {
+      return;
+    }
+
+    const ageMs = nowMs - createdAt;
+    if (ageMs < -REPORT_FUTURE_TOLERANCE_MS || ageMs > REPORT_HISTORY_WINDOW_MS || !report?.lotId) {
+      return;
+    }
+
+    const normalizedReport = { ...report, createdAt };
+    if (!groupedReports[report.lotId]) {
+      groupedReports[report.lotId] = [];
+    }
+
+    groupedReports[report.lotId].push(normalizedReport);
+  });
+
+  Object.values(groupedReports).forEach((lotReports) => {
+    lotReports.sort((left, right) => (right.createdAt || 0) - (left.createdAt || 0));
+  });
+
+  return groupedReports;
+};
+
+const mergeReportsForPrediction = (remoteReports = [], localReport, nowMs) => {
+  const mergedReports = [...remoteReports];
+  if (localReport) {
+    mergedReports.unshift({
+      ...localReport,
+      createdAt: getReportTimestampMs(localReport) ?? localReport.createdAt,
+    });
+  }
+
+  const seenReports = new Set();
+  return mergedReports
+    .filter((report) => {
+      const createdAt = getReportTimestampMs(report);
+      if (!createdAt) {
+        return false;
+      }
+
+      const ageMs = nowMs - createdAt;
+      if (ageMs < -REPORT_FUTURE_TOLERANCE_MS || ageMs > REPORT_HISTORY_WINDOW_MS) {
+        return false;
+      }
+
+      const fingerprint = reportFingerprint({ ...report, createdAt });
+      if (seenReports.has(fingerprint)) {
+        return false;
+      }
+
+      seenReports.add(fingerprint);
+      return true;
+    })
+    .sort((left, right) => (getReportTimestampMs(right) || 0) - (getReportTimestampMs(left) || 0));
+};
+
+const enrichReportsForPrediction = (reports, lot, calendarSignals) =>
+  reports.map((report) => {
+    const reportTimestamp = getReportTimestampMs(report);
+    if (!reportTimestamp) {
+      return report;
+    }
+
+    return {
+      ...report,
+      createdAt: reportTimestamp,
+      derivedAcademicDayType: resolveAcademicDayType({
+        date: new Date(reportTimestamp),
+        lot,
+        calendarSignals,
+      }),
+    };
+  });
+
 export default function MapScreen() {
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
@@ -92,13 +309,18 @@ export default function MapScreen() {
   const [weatherCode, setWeatherCode] = useState(null);
   const [reportModalVisible, setReportModalVisible] = useState(false);
   const [crowdsourceReports, setCrowdsourceReports] = useState({});
-  const sheetMaxHeight = Math.min(windowHeight * 0.78, 560);
+  const [predictionNowMs, setPredictionNowMs] = useState(Date.now());
+  const [remoteReports, setRemoteReports] = useState([]);
+  const [calendarSignals, setCalendarSignals] = useState(ACADEMIC_CALENDAR_SIGNALS);
+  const [campusLoadBuckets, setCampusLoadBuckets] = useState(CAMPUS_LOAD_BUCKETS);
+  const sheetMaxHeight = Math.min(windowHeight * 0.78, 600);
   const sheetPeekHeight = Math.min(windowHeight * 0.5, 25);
   const sheetMaxOffset = Math.max(sheetMaxHeight - sheetPeekHeight, 0);
   const sheetHiddenOffset = sheetMaxHeight + 40;
   const sheetTranslateY = useRef(new Animated.Value(sheetHiddenOffset)).current;
   const sheetDragStartRef = useRef(sheetHiddenOffset);
   const pendingSheetOffsetRef = useRef(null);
+  const predictionDisplayScoresRef = useRef({});
   const [weather, setWeather] = useState({
     label: 'Loading weather...',
     icon: 'cloudy-outline',
@@ -119,6 +341,77 @@ export default function MapScreen() {
     });
 
     return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setPredictionNowMs(Date.now());
+    }, PREDICTION_TICK_MS);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    const reportsQuery = query(
+      collection(db, 'reports'),
+      orderBy('createdAt', 'desc'),
+      limit(REPORTS_SUBSCRIPTION_LIMIT)
+    );
+
+    return onSnapshot(
+      reportsQuery,
+      (snapshot) => {
+        const nextReports = snapshot.docs.map((docSnapshot) => ({
+          id: docSnapshot.id,
+          ...docSnapshot.data(),
+        }));
+        setRemoteReports(nextReports);
+      },
+      () => {
+        setRemoteReports([]);
+      }
+    );
+  }, []);
+
+  useEffect(() => {
+    const unsubscribeCalendar = onSnapshot(
+      collection(db, 'calendarSignals'),
+      (snapshot) => {
+        if (snapshot.empty) {
+          setCalendarSignals(ACADEMIC_CALENDAR_SIGNALS);
+          return;
+        }
+
+        setCalendarSignals(snapshot.docs.map((docSnapshot) => ({ id: docSnapshot.id, ...docSnapshot.data() })));
+      },
+      () => {
+        setCalendarSignals(ACADEMIC_CALENDAR_SIGNALS);
+      }
+    );
+
+    const unsubscribeCampusLoad = onSnapshot(
+      collection(db, 'campusLoadBuckets'),
+      (snapshot) => {
+        if (snapshot.empty) {
+          setCampusLoadBuckets(CAMPUS_LOAD_BUCKETS);
+          return;
+        }
+
+        setCampusLoadBuckets(
+          snapshot.docs.map((docSnapshot) => ({ id: docSnapshot.id, ...docSnapshot.data() }))
+        );
+      },
+      () => {
+        setCampusLoadBuckets(CAMPUS_LOAD_BUCKETS);
+      }
+    );
+
+    return () => {
+      unsubscribeCalendar();
+      unsubscribeCampusLoad();
+    };
   }, []);
 
   useEffect(() => {
@@ -170,12 +463,18 @@ export default function MapScreen() {
     setRestoredSelectedLotId(null);
   }, [lots, restoredSelectedLotId]);
 
+  const selectedLotDistanceMeters = useMemo(() => {
+    if (!selectedLot || !userCoordinate) {
+      return null;
+    }
+    return distanceMeters(userCoordinate, selectedLot.coordinate);
+  }, [selectedLot, userCoordinate]);
+
   const nearestLot = useMemo(() => {
     if (!userCoordinate || lots.length === 0) {
       return null;
     }
 
-    // Pick the closest lot from current user location.
     return lots.reduce((currentNearest, lot) => {
       if (!currentNearest) {
         return lot;
@@ -186,13 +485,6 @@ export default function MapScreen() {
       return nextDistance < currentDistance ? lot : currentNearest;
     }, null);
   }, [userCoordinate, lots]);
-
-  const selectedLotDistanceMeters = useMemo(() => {
-    if (!selectedLot || !userCoordinate) {
-      return null;
-    }
-    return distanceMeters(userCoordinate, selectedLot.coordinate);
-  }, [selectedLot, userCoordinate]);
 
   const canReportSelectedLot =
     selectedLotDistanceMeters !== null && selectedLotDistanceMeters <= REPORT_DISTANCE_LIMIT_METERS;
@@ -213,8 +505,140 @@ export default function MapScreen() {
     return '';
   }, [selectedLot, userCoordinate, selectedLotDistanceMeters]);
 
+  const zoomDelta = Math.max(mapRegion.latitudeDelta, mapRegion.longitudeDelta);
+  // Keep map clean when zoomed out. Show labels only when zoomed out enough.
+  const hideParkingMarkersWhenZoomedOut = zoomDelta > 0.022;
+  const showZoneLabels = zoomDelta >= 0.028;
+
+  const firestoreReportsByLot = useMemo(
+    () => groupReportsByLot(remoteReports, predictionNowMs),
+    [remoteReports, predictionNowMs]
+  );
+
+  const lotPredictions = useMemo(() => {
+    const predictions = {};
+    const engineUpdatedAt = predictionNowMs;
+    const predictionDate = new Date(predictionNowMs);
+
+    lots.forEach((lot) => {
+      const mergedReports = mergeReportsForPrediction(
+        firestoreReportsByLot[lot.id] || [],
+        crowdsourceReports[lot.id],
+        predictionNowMs
+      );
+      const reportsForLot = enrichReportsForPrediction(mergedReports, lot, calendarSignals);
+      const signalContext = resolvePredictionSignals({
+        date: predictionDate,
+        lot,
+        calendarSignals,
+        campusLoadBuckets,
+      });
+      const previousDisplayScore = predictionDisplayScoresRef.current[lot.id] ?? null;
+      const prediction = predictAvailability({
+        lot,
+        weatherCode,
+        atDate: predictionDate,
+        reports: reportsForLot,
+        prevDisplayScore: previousDisplayScore,
+        ...signalContext,
+      });
+      const updatedBy =
+        prediction.reportCount > 0 && prediction.latestReportAt ? 'Crowd' : prediction.engineScore != null ? 'Engine' : null;
+      const updatedAt = updatedBy === 'Crowd' ? prediction.latestReportAt : updatedBy === 'Engine' ? engineUpdatedAt : null;
+
+      predictions[lot.id] = {
+        ...prediction,
+        score: prediction.displayScore,
+        status: prediction.status,
+        updatedAt,
+        updatedBy,
+        engineScore: prediction.engineScore,
+        crowdScore: prediction.crowdScore,
+        reportCount: prediction.reportCount,
+      };
+    });
+    return predictions;
+  }, [
+    lots,
+    weatherCode,
+    crowdsourceReports,
+    predictionNowMs,
+    firestoreReportsByLot,
+    calendarSignals,
+    campusLoadBuckets,
+  ]);
+
+  const recommendedLot = useMemo(() => {
+    if (!userCoordinate || lots.length === 0) {
+      return null;
+    }
+
+    return lots.reduce((currentBestLot, lot) => {
+      const walkingDistance = distanceMeters(userCoordinate, lot.coordinate);
+      const prediction = lotPredictions[lot.id];
+      const availabilityScore = getAvailabilityScore(prediction, lot);
+      const convenienceScore = getConvenienceScore(lot);
+      const recommendationScore = getRecommendationScore({
+        distance: walkingDistance,
+        availabilityScore,
+        convenienceScore,
+      });
+
+      const scoredLot = {
+        ...lot,
+        recommendationDistanceMeters: walkingDistance,
+        recommendationAvailabilityScore: availabilityScore,
+        recommendationScore,
+      };
+
+      if (!currentBestLot) {
+        return scoredLot;
+      }
+
+      if (scoredLot.recommendationScore !== currentBestLot.recommendationScore) {
+        return scoredLot.recommendationScore > currentBestLot.recommendationScore
+          ? scoredLot
+          : currentBestLot;
+      }
+
+      return scoredLot.recommendationDistanceMeters < currentBestLot.recommendationDistanceMeters
+        ? scoredLot
+        : currentBestLot;
+    }, null);
+  }, [userCoordinate, lots, lotPredictions]);
+
+  const mostOpenLot = useMemo(() => {
+    if (lots.length === 0) {
+      return null;
+    }
+
+    return lots.reduce((currentMostOpen, lot) => {
+      const prediction = lotPredictions[lot.id];
+      const availabilityScore = getAvailabilityScore(prediction, lot);
+      const walkingDistance = userCoordinate ? distanceMeters(userCoordinate, lot.coordinate) : Number.POSITIVE_INFINITY;
+      const scoredLot = {
+        ...lot,
+        recommendationAvailabilityScore: availabilityScore,
+        recommendationDistanceMeters: walkingDistance,
+      };
+
+      if (!currentMostOpen) {
+        return scoredLot;
+      }
+
+      if (scoredLot.recommendationAvailabilityScore !== currentMostOpen.recommendationAvailabilityScore) {
+        return scoredLot.recommendationAvailabilityScore > currentMostOpen.recommendationAvailabilityScore
+          ? scoredLot
+          : currentMostOpen;
+      }
+
+      return scoredLot.recommendationDistanceMeters < currentMostOpen.recommendationDistanceMeters
+        ? scoredLot
+        : currentMostOpen;
+    }, null);
+  }, [lots, lotPredictions, userCoordinate]);
+
   const searchableLots = useMemo(() => {
-    // Base list: alphabetical. If user typed text, apply filtering.
     const sortedLots = [...lots].sort((left, right) => left.name.localeCompare(right.name));
     const filteredLots = normalizedSearchQuery
       ? sortedLots.filter((lot) => {
@@ -223,64 +647,72 @@ export default function MapScreen() {
       })
       : sortedLots;
 
-    if (!nearestLot) {
+    if (!recommendedLot) {
       return filteredLots;
     }
 
-    const nearestIndex = filteredLots.findIndex((lot) => lot.id === nearestLot.id);
-    if (nearestIndex <= 0) {
-      return filteredLots;
-    }
-
-    // Move nearest to top so users can tap it fast.
     const nextLots = [...filteredLots];
-    const [nearestEntry] = nextLots.splice(nearestIndex, 1);
-    nextLots.unshift(nearestEntry);
+    const priorityIds = [recommendedLot.id];
+
+    if (nearestLot?.id && nearestLot.id !== recommendedLot.id) {
+      priorityIds.push(nearestLot.id);
+    }
+
+    if (
+      mostOpenLot?.id &&
+      mostOpenLot.id !== recommendedLot.id &&
+      mostOpenLot.id !== nearestLot?.id
+    ) {
+      priorityIds.push(mostOpenLot.id);
+    }
+
+    priorityIds
+      .reverse()
+      .forEach((lotId) => {
+        const lotIndex = nextLots.findIndex((lot) => lot.id === lotId);
+        if (lotIndex > 0) {
+          const [lotEntry] = nextLots.splice(lotIndex, 1);
+          nextLots.unshift(lotEntry);
+        }
+      });
+
     return nextLots;
-  }, [lots, nearestLot, normalizedSearchQuery]);
-  const zoomDelta = Math.max(mapRegion.latitudeDelta, mapRegion.longitudeDelta);
-  // Keep map clean when zoomed out. Show labels only when zoomed out enough.
-  const hideParkingMarkersWhenZoomedOut = zoomDelta > 0.022;
-  const showZoneLabels = zoomDelta >= 0.028;
+  }, [lots, nearestLot, recommendedLot, mostOpenLot, normalizedSearchQuery]);
 
-  const lotPredictions = useMemo(() => {
-    const predictions = {};
-    const engineUpdatedAt = Date.now();
-
-    lots.forEach((lot) => {
-      const base = predictAvailability({ lot, weatherCode });
-      const report = crowdsourceReports[lot.id];
-      if (report) {
-        const blended = blendWithCrowdsource(base.score, report);
-        predictions[lot.id] = {
-          score: blended,
-          status: scoreToStatus(blended),
-          updatedAt: report.createdAt,
-          updatedBy: 'Crowd',
-        };
-      } else {
-        predictions[lot.id] = {
-          ...base,
-          updatedAt: engineUpdatedAt,
-          updatedBy: 'Engine',
-        };
+  useEffect(() => {
+    const nextDisplayScores = {};
+    Object.entries(lotPredictions).forEach(([lotId, prediction]) => {
+      if (typeof prediction?.score === 'number') {
+        nextDisplayScores[lotId] = prediction.score;
       }
     });
-    return predictions;
-  }, [lots, weatherCode, crowdsourceReports]);
+    predictionDisplayScoresRef.current = nextDisplayScores;
+  }, [lotPredictions]);
 
   const selectedLotTimelineScores = useMemo(() => {
     if (!selectedLot) {
       return [];
     }
 
-    const now = new Date();
+    const now = new Date(predictionNowMs);
     return Array.from({ length: 24 }, (_, hour) => {
       const targetDate = new Date(now);
       targetDate.setHours(hour, 0, 0, 0);
-      return predictAvailability({ lot: selectedLot, weatherCode, atDate: targetDate }).score;
+      const signalContext = resolvePredictionSignals({
+        date: targetDate,
+        lot: selectedLot,
+        calendarSignals,
+        campusLoadBuckets,
+      });
+      return predictAvailability({
+        lot: selectedLot,
+        weatherCode,
+        atDate: targetDate,
+        reports: [],
+        ...signalContext,
+      }).score;
     });
-  }, [selectedLot, weatherCode]);
+  }, [selectedLot, weatherCode, predictionNowMs, calendarSignals, campusLoadBuckets]);
 
   const loadWeather = async () => {
     try {
@@ -479,18 +911,18 @@ export default function MapScreen() {
     );
   };
 
-  const handleGoToNearest = () => {
+  const handleGoToRecommended = () => {
     if (!userCoordinate) {
-      Alert.alert('Location Required', 'Enable location access to jump to the nearest parking lot.');
+      Alert.alert('Location Required', 'Enable location access to jump to a recommended parking lot.');
       return;
     }
 
-    if (!nearestLot) {
-      Alert.alert('No Lot Found', 'Unable to find nearby parking lots at the moment.');
+    if (!recommendedLot) {
+      Alert.alert('No Lot Found', 'Unable to find a recommended parking lot at the moment.');
       return;
     }
 
-    handleSelectLot(nearestLot);
+    handleSelectLot(recommendedLot);
   };
 
   const clearSearchQuery = () => {
@@ -546,6 +978,7 @@ export default function MapScreen() {
         }}
         ref={mapRef}
         showsCompass={false}
+        showsMyLocationButton={false}
         showsPointsOfInterest={false}
         showsUserLocation
         mapPadding={{
@@ -584,7 +1017,7 @@ export default function MapScreen() {
           ))
           : null}
 
-        {selectedLot ? (
+        {selectedLot && !hideParkingMarkersWhenZoomedOut ? (
           <Circle
             center={selectedLot.coordinate}
             fillColor="rgba(242, 201, 76, 0.12)"
@@ -657,10 +1090,10 @@ export default function MapScreen() {
             </Pressable>
           ) : null}
           <Pressable
-            accessibilityLabel="Go to nearest parking lot"
+            accessibilityLabel="Go to recommended parking lot"
             accessibilityRole="button"
             hitSlop={6}
-            onPress={handleGoToNearest}
+            onPress={handleGoToRecommended}
             style={({ pressed }) => [styles.searchTrailingButton, pressed && styles.iconButtonPressed]}
           >
             <Ionicons color={appTheme.color.brandGold} name="locate-outline" size={18} />
@@ -718,11 +1151,23 @@ export default function MapScreen() {
                       <Text numberOfLines={1} style={styles.lotListName}>
                         {lot.name}
                       </Text>
-                      {nearestLot?.id === lot.id ? (
-                        <View style={styles.nearestTag}>
-                          <Text style={styles.nearestTagText}>Nearest</Text>
-                        </View>
-                      ) : null}
+                      <View style={styles.lotListTagRow}>
+                        {recommendedLot?.id === lot.id ? (
+                          <View style={[styles.nearestTag, styles.recommendedTag]}>
+                            <Text style={[styles.nearestTagText, styles.recommendedTagText]}>Recommended</Text>
+                          </View>
+                        ) : null}
+                        {nearestLot?.id === lot.id ? (
+                          <View style={styles.nearestTag}>
+                            <Text style={styles.nearestTagText}>Nearest</Text>
+                          </View>
+                        ) : null}
+                        {mostOpenLot?.id === lot.id ? (
+                          <View style={[styles.nearestTag, styles.mostOpenTag]}>
+                            <Text style={[styles.nearestTagText, styles.mostOpenTagText]}>Most Open</Text>
+                          </View>
+                        ) : null}
+                      </View>
                     </View>
                     <Text numberOfLines={1} style={styles.lotListMeta}>
                       {lot.campus === 'studley' ? 'Studley' : 'Sexton'} Campus | {lot.address}
@@ -751,6 +1196,7 @@ export default function MapScreen() {
       >
         <LotBottomSheet
           canReport={canReportSelectedLot}
+          currentTimeMs={predictionNowMs}
           dragHandleProps={sheetPanResponder.panHandlers}
           lot={selectedLot}
           predictedStatus={selectedLot ? lotPredictions[selectedLot.id] : null}
@@ -885,6 +1331,12 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: appTheme.spacing.sm,
   },
+  lotListTagRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: appTheme.spacing.xs,
+    flexShrink: 0,
+  },
   lotListName: {
     flex: 1,
     color: appTheme.color.textPrimary,
@@ -900,14 +1352,28 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 2,
     borderRadius: 999,
-    backgroundColor: 'rgba(242, 201, 76, 0.18)',
+    backgroundColor: 'rgba(242, 201, 76, 0.26)',
     borderWidth: 1,
-    borderColor: 'rgba(242, 201, 76, 0.5)',
+    borderColor: 'rgba(242, 201, 76, 0.65)',
+  },
+  recommendedTag: {
+    backgroundColor: 'rgba(39, 174, 96, 0.28)',
+    borderColor: 'rgba(39, 174, 96, 0.55)',
+  },
+  mostOpenTag: {
+    backgroundColor: 'rgba(47, 128, 237, 0.26)',
+    borderColor: 'rgba(47, 128, 237, 0.58)',
   },
   nearestTagText: {
-    color: appTheme.color.brandGold,
+    color: '#F8FAFC',
     fontSize: 11,
     fontWeight: '700',
+  },
+  recommendedTagText: {
+    color: '#F8FAFC',
+  },
+  mostOpenTagText: {
+    color: '#F8FAFC',
   },
   emptyListText: {
     paddingHorizontal: appTheme.spacing.md,

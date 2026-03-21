@@ -3,7 +3,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
 import { STATUS_META } from '../../constants/statusStyle';
 import { appTheme, componentMetrics } from '../../theme/tokens';
-import { isEveningTime } from '../../utils/engine';
+import { isEveningTime, scoreToStatus } from '../../utils/engine';
 import PrimaryButton from '../common/PrimaryButton';
 
 const formatUpdatedAt = (timestamp) => {
@@ -14,12 +14,37 @@ const formatUpdatedAt = (timestamp) => {
 };
 
 const clampScore = (value) => Math.max(0, Math.min(100, Math.round(value ?? 50)));
+const TIMELINE_TRACK_HEIGHT = 44;
+const TIMELINE_BAR_MIN_HEIGHT = 8;
+const TIMELINE_BAR_MAX_HEIGHT = 40;
 
-const scoreColor = (score) => {
-  if (score > 75) return appTheme.color.status.EMPTY;
-  if (score > 50) return appTheme.color.status.NORMAL;
-  if (score > 25) return appTheme.color.status.CROWDED;
-  return appTheme.color.status.FULL;
+const scoreColor = (score) => STATUS_META[scoreToStatus(clampScore(score))]?.color || appTheme.color.status.UNKNOWN;
+
+const getTimelineStats = (scores = []) => {
+  const normalizedScores = scores.map(clampScore);
+  if (!normalizedScores.length) {
+    return {
+      normalizedScores,
+      minScore: 0,
+      maxScore: 100,
+      range: 100,
+    };
+  }
+
+  const minScore = Math.min(...normalizedScores);
+  const maxScore = Math.max(...normalizedScores);
+
+  return {
+    normalizedScores,
+    minScore,
+    maxScore,
+    range: Math.max(12, maxScore - minScore),
+  };
+};
+
+const getTimelineBarHeight = (score, minScore, range) => {
+  const normalized = range <= 0 ? 0.5 : (clampScore(score) - minScore) / range;
+  return TIMELINE_BAR_MIN_HEIGHT + Math.round(normalized * (TIMELINE_BAR_MAX_HEIGHT - TIMELINE_BAR_MIN_HEIGHT));
 };
 
 export default function LotBottomSheet({
@@ -27,6 +52,7 @@ export default function LotBottomSheet({
   lot,
   predictedStatus,
   canReport = true,
+  currentTimeMs = Date.now(),
   reportDisabledMessage = '',
   timelineScores = [],
   dragHandleProps = {},
@@ -53,6 +79,13 @@ export default function LotBottomSheet({
   const updatedAt = predictedStatus?.updatedAt || lot.lastStatusAt;
   const updatedSource = predictedStatus?.updatedBy || (lot.lastStatusAt ? 'Crowd' : null);
   const updatedText = updatedAt && updatedSource ? `${updatedSource} ${formatUpdatedAt(updatedAt)}` : null;
+  const engineScore = typeof predictedStatus?.engineScore === 'number' ? clampScore(predictedStatus.engineScore) : null;
+  const crowdScore = typeof predictedStatus?.crowdScore === 'number' ? clampScore(predictedStatus.crowdScore) : null;
+  const reportCount = typeof predictedStatus?.reportCount === 'number' ? predictedStatus.reportCount : 0;
+  const { normalizedScores: normalizedTimelineScores, minScore: timelineMinScore, range: timelineRange } =
+    getTimelineStats(timelineScores);
+  const currentDate = new Date(currentTimeMs || Date.now());
+  const currentTimelineHour = currentDate.getHours();
 
   return (
     <View {...dragHandleProps} style={styles.container}>
@@ -123,6 +156,13 @@ export default function LotBottomSheet({
             <Text style={styles.scoreCaption}>Packed</Text>
             <Text style={styles.scoreCaption}>More Available</Text>
           </View>
+          {crowdScore !== null ? (
+            <Text style={styles.scoreDetailLine}>
+              Engine {engineScore ?? '--'} | Crowd {crowdScore} | {reportCount} recent report{reportCount === 1 ? '' : 's'}
+            </Text>
+          ) : engineScore !== null ? (
+            <Text style={styles.scoreDetailLine}>Engine {engineScore} | No recent crowd reports yet</Text>
+          ) : null}
         </View>
 
         <View style={styles.infoGrid}>
@@ -154,15 +194,29 @@ export default function LotBottomSheet({
 
         {timelineScores.length > 0 ? (
           <View style={styles.timelineSection}>
-            <Text style={styles.timelineTitle}>24h Predicted Availability</Text>
+            <View style={styles.timelineHeader}>
+              <Text style={styles.timelineTitle}>24h Predicted Availability</Text>
+            </View>
             <View style={styles.timelineBars}>
-              {timelineScores.map((score, index) => (
-                <View key={`timeline-${index}`} style={styles.timelineSlot}>
+              {normalizedTimelineScores.map((score, index) => (
+                <View
+                  key={`timeline-${index}`}
+                  style={[styles.timelineSlot, index === currentTimelineHour && styles.timelineSlotCurrent]}
+                >
+                  <View
+                    style={[
+                      styles.timelineTrack,
+                      index === currentTimelineHour && styles.timelineTrackCurrent,
+                      index === 7 && styles.timelinePhaseDivider,
+                      index === 17 && styles.timelinePhaseDivider,
+                    ]}
+                  />
                   <View
                     style={[
                       styles.timelineBar,
+                      index === currentTimelineHour && styles.timelineBarCurrent,
                       {
-                        height: Math.max(6, Math.round((score / 100) * 34)),
+                        height: getTimelineBarHeight(score, timelineMinScore, timelineRange),
                         backgroundColor: scoreColor(score),
                       },
                     ]}
@@ -172,7 +226,8 @@ export default function LotBottomSheet({
             </View>
             <View style={styles.timelineLabelRow}>
               <Text style={styles.timelineLabel}>00:00</Text>
-              <Text style={styles.timelineLabel}>12:00</Text>
+              <Text style={styles.timelineLabel}>08:00</Text>
+              <Text style={styles.timelineLabel}>17:00</Text>
               <Text style={styles.timelineLabel}>23:00</Text>
             </View>
           </View>
@@ -327,6 +382,11 @@ const styles = StyleSheet.create({
     color: appTheme.color.textSecondary,
     fontSize: 11,
   },
+  scoreDetailLine: {
+    marginTop: appTheme.spacing.xs,
+    color: appTheme.color.textSecondary,
+    fontSize: appTheme.typography.size.xs,
+  },
   infoGrid: {
     flexDirection: 'row',
     gap: appTheme.spacing.sm,
@@ -368,31 +428,70 @@ const styles = StyleSheet.create({
   timelineSection: {
     marginTop: appTheme.spacing.md,
   },
+  timelineHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: appTheme.spacing.xs,
+  },
   timelineTitle: {
     color: appTheme.color.textSecondary,
     fontSize: appTheme.typography.size.xs,
-    marginBottom: appTheme.spacing.xs,
+  },
+  timelineRangeText: {
+    color: appTheme.color.textSecondary,
+    fontSize: 11,
   },
   timelineBars: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: 2,
-    height: 36,
+    height: 56,
     borderWidth: 1,
     borderColor: appTheme.color.borderDefault,
     borderRadius: appTheme.radius.sm,
     backgroundColor: appTheme.color.bgSurface,
     paddingHorizontal: 4,
-    paddingVertical: 2,
+    paddingVertical: 4,
+    overflow: 'hidden',
   },
   timelineSlot: {
     flex: 1,
+    height: '100%',
     alignItems: 'center',
     justifyContent: 'flex-end',
+    position: 'relative',
+    borderRadius: 4,
+    paddingVertical: 2,
+  },
+  timelineSlotCurrent: {
+    backgroundColor: 'rgba(242, 201, 76, 0.22)',
+    borderWidth: 1,
+    borderColor: 'rgba(242, 201, 76, 0.55)',
+  },
+  timelineTrack: {
+    position: 'absolute',
+    bottom: 0,
+    width: 4,
+    height: TIMELINE_TRACK_HEIGHT,
+    borderRadius: 3,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  timelineTrackCurrent: {
+    backgroundColor: 'rgba(242, 201, 76, 0.28)',
+  },
+  timelinePhaseDivider: {
+    borderLeftWidth: 1,
+    borderLeftColor: 'rgba(255,255,255,0.16)',
   },
   timelineBar: {
     width: 4,
     borderRadius: 3,
+    zIndex: 1,
+  },
+  timelineBarCurrent: {
+    width: 6,
+    borderRadius: 4,
   },
   timelineLabelRow: {
     flexDirection: 'row',

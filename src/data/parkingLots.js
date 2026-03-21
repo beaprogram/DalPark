@@ -182,6 +182,7 @@ export const PARKING_LOTS = [
   {
     id: 'studley-mccain-parkade',
     campus: 'studley',
+    lotType: 'PARKADE_LOT',
     name: 'McCain Parkade',
     address: '6071 University Avenue, Halifax, NS B3H 4R2',
     coordinate: { latitude: 44.63764, longitude: -63.58911 },
@@ -227,6 +228,7 @@ export const PARKING_LOTS = [
   {
     id: 'studley-glengarry',
     campus: 'studley',
+    lotType: 'RESIDENCE_LOT',
     name: 'Glengarry',
     address: '1253 Edward Street, Halifax, NS B3H 4R2',
     coordinate: { latitude: 44.63713, longitude: -63.5861 },
@@ -257,6 +259,7 @@ export const PARKING_LOTS = [
   {
     id: 'studley-csb-parkade',
     campus: 'studley',
+    lotType: 'PARKADE_LOT',
     name: 'CSB Parkade',
     address: '6050 University Avenue, Halifax, NS B3H 4R2',
     coordinate: { latitude: 44.63656, longitude: -63.58831 },
@@ -272,6 +275,7 @@ export const PARKING_LOTS = [
   {
     id: 'studley-risley-hall-lot',
     campus: 'studley',
+    lotType: 'RESIDENCE_LOT',
     name: 'Risley Hall Lot',
     address: '1233 LeMarchant Street, Halifax, NS B3H 4R2',
     coordinate: { latitude: 44.63585, longitude: -63.58885 },
@@ -287,6 +291,7 @@ export const PARKING_LOTS = [
   {
     id: 'studley-risley-hall-parkade',
     campus: 'studley',
+    lotType: 'RESIDENCE_LOT',
     name: 'Risley Hall Parkade',
     address: '1233 LeMarchant Street, Halifax, NS B3H 4R2',
     coordinate: { latitude: 44.63611, longitude: -63.58936 },
@@ -347,6 +352,7 @@ export const PARKING_LOTS = [
   {
     id: 'studley-stairs',
     campus: 'studley',
+    lotType: 'RESIDENCE_LOT',
     name: 'Stairs',
     address: '6230 South Street, Halifax, NS B3H 4R2',
     coordinate: { latitude: 44.635, longitude: -63.5911 },
@@ -377,6 +383,7 @@ export const PARKING_LOTS = [
   {
     id: 'studley-dalplex',
     campus: 'studley',
+    lotType: 'EVENT_LOT',
     name: 'Dalplex',
     address: '6260 South Street, Halifax, NS B3H 4R2',
     coordinate: { latitude: 44.63397, longitude: -63.5925 },
@@ -392,6 +399,7 @@ export const PARKING_LOTS = [
   {
     id: 'studley-shirreff-hall',
     campus: 'studley',
+    lotType: 'RESIDENCE_LOT',
     name: 'Shirreff Hall',
     address: '6385 South Street, Halifax, NS B3H 4R2',
     coordinate: { latitude: 44.63461, longitude: -63.59444 },
