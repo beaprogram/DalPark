@@ -7,7 +7,29 @@ import { auth, db, storage } from '../../config/firebase';
 import { appTheme, componentMetrics } from '../../theme/tokens';
 import PrimaryButton from '../common/PrimaryButton';
 
-const MOOD_FACES = ['😡', '😟', '😐', '🙂', '😁'];
+const MOOD_FACES = ['\uD83D\uDE28', '\uD83D\uDE1F', '\uD83D\uDE10', '\uD83D\uDE42', '\uD83D\uDE04'];
+
+const getPhotoUploadErrorMessage = (error) => {
+  switch (error?.code) {
+    case 'storage/unauthorized':
+      return 'The report was saved, but photo upload is blocked by Firebase Storage rules.';
+    case 'storage/quota-exceeded':
+      return 'The report was saved, but photo upload failed because Firebase Storage quota was exceeded.';
+    default:
+      return 'The report was saved, but the photo could not be uploaded.';
+  }
+};
+
+const getReportSaveErrorMessage = (error) => {
+  switch (error?.code) {
+    case 'permission-denied':
+      return 'Firebase denied the report write. Check Firestore rules.';
+    case 'unavailable':
+      return 'Network unavailable. Try again when the connection is stable.';
+    default:
+      return 'Could not save the report. Try again.';
+  }
+};
 
 const uploadReportPhoto = async ({ photoUri, lotId, userId }) => {
   if (!photoUri || !lotId || !userId) {
@@ -75,11 +97,24 @@ export default function ReportModal({ visible, lot, onClose, onReported }) {
 
     try {
       const clientCreatedAt = Date.now();
-      const { photoUrl, photoPath } = await uploadReportPhoto({
-        photoUri: photo,
-        lotId: lot.id,
-        userId: auth.currentUser.uid,
-      });
+      let photoUrl = null;
+      let photoPath = null;
+      let photoUploadError = null;
+
+      if (photo) {
+        try {
+          const uploadedPhoto = await uploadReportPhoto({
+            photoUri: photo,
+            lotId: lot.id,
+            userId: auth.currentUser.uid,
+          });
+          photoUrl = uploadedPhoto.photoUrl;
+          photoPath = uploadedPhoto.photoPath;
+        } catch (error) {
+          photoUploadError = error;
+          console.error('Report photo upload failed:', error);
+        }
+      }
 
       const entry = {
         lotId: lot.id,
@@ -100,7 +135,10 @@ export default function ReportModal({ visible, lot, onClose, onReported }) {
 
       const docRef = await addDoc(collection(db, 'reports'), entry);
 
-      Alert.alert('Thanks!', 'Report submitted.');
+      Alert.alert(
+        photoUploadError ? 'Report submitted' : 'Thanks!',
+        photoUploadError ? getPhotoUploadErrorMessage(photoUploadError) : 'Report submitted.'
+      );
       setPick(3);
       setPhoto(null);
 
@@ -109,12 +147,14 @@ export default function ReportModal({ visible, lot, onClose, onReported }) {
           id: docRef.id,
           ...entry,
           createdAt: clientCreatedAt,
+          imgUri: photo,
         });
       }
 
       onClose();
-    } catch (_error) {
-      Alert.alert('Oops', 'Could not save. Try again.');
+    } catch (error) {
+      console.error('Report save failed:', error);
+      Alert.alert('Oops', getReportSaveErrorMessage(error));
     } finally {
       setSending(false);
     }

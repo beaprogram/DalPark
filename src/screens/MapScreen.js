@@ -47,6 +47,11 @@ const REPORTS_SUBSCRIPTION_LIMIT = 1000;
 const RECOMMENDATION_DISTANCE_WEIGHT = 0.45;
 const RECOMMENDATION_AVAILABILITY_WEIGHT = 0.45;
 const RECOMMENDATION_CONVENIENCE_WEIGHT = 0.1;
+const LOT_LIST_BASE_MAX_HEIGHT = 420;
+const LOT_LIST_WITH_SHEET_MAX_HEIGHT = 184;
+const LOT_LIST_WITH_SHEET_SMALL_MAX_HEIGHT = 128;
+const SMALL_SCREEN_HEIGHT_THRESHOLD = 860;
+const SMALL_SCREEN_WIDTH_THRESHOLD = 400;
 const ISO_WITH_TIMEZONE_RE =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+\-]\d{2}:\d{2})$/;
 
@@ -275,6 +280,9 @@ const mergeReportsForPrediction = (remoteReports = [], localReport, nowMs) => {
     .sort((left, right) => (getReportTimestampMs(right) || 0) - (getReportTimestampMs(left) || 0));
 };
 
+const getReportPhotoUri = (report) =>
+  report?.photoUrl || report?.imageUrl || report?.imgUri || null;
+
 const enrichReportsForPrediction = (reports, lot, calendarSignals) =>
   reports.map((report) => {
     const reportTimestamp = getReportTimestampMs(report);
@@ -295,7 +303,7 @@ const enrichReportsForPrediction = (reports, lot, calendarSignals) =>
 
 export default function MapScreen() {
   const insets = useSafeAreaInsets();
-  const { height: windowHeight } = useWindowDimensions();
+  const { height: windowHeight, width: windowWidth } = useWindowDimensions();
   const mapRef = useRef(null);
   const hasHydratedPreferences = useRef(false);
   const [lots, setLots] = useState([]);
@@ -313,10 +321,11 @@ export default function MapScreen() {
   const [remoteReports, setRemoteReports] = useState([]);
   const [calendarSignals, setCalendarSignals] = useState(ACADEMIC_CALENDAR_SIGNALS);
   const [campusLoadBuckets, setCampusLoadBuckets] = useState(CAMPUS_LOAD_BUCKETS);
-  const sheetMaxHeight = Math.min(windowHeight * 0.78, 600);
+  const sheetMaxHeight = Math.min(windowHeight * 0.58, 480);
   const sheetPeekHeight = Math.min(windowHeight * 0.5, 25);
   const sheetMaxOffset = Math.max(sheetMaxHeight - sheetPeekHeight, 0);
   const sheetHiddenOffset = sheetMaxHeight + 40;
+  const lotListAnimation = useRef(new Animated.Value(1)).current;
   const sheetTranslateY = useRef(new Animated.Value(sheetHiddenOffset)).current;
   const sheetDragStartRef = useRef(sheetHiddenOffset);
   const pendingSheetOffsetRef = useRef(null);
@@ -327,6 +336,13 @@ export default function MapScreen() {
     temperature: '--',
   });
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+  const isSmallPhoneScreen =
+    windowWidth <= SMALL_SCREEN_WIDTH_THRESHOLD || windowHeight <= SMALL_SCREEN_HEIGHT_THRESHOLD;
+  const lotListMaxHeight = !selectedLot
+    ? LOT_LIST_BASE_MAX_HEIGHT
+    : isSmallPhoneScreen
+      ? LOT_LIST_WITH_SHEET_SMALL_MAX_HEIGHT
+      : LOT_LIST_WITH_SHEET_MAX_HEIGHT;
 
   useEffect(() => {
     // Lots now come from Firestore with local fallback in service.
@@ -356,7 +372,7 @@ export default function MapScreen() {
   useEffect(() => {
     const reportsQuery = query(
       collection(db, 'reports'),
-      orderBy('createdAt', 'desc'),
+      orderBy('clientCreatedAt', 'desc'),
       limit(REPORTS_SUBSCRIPTION_LIMIT)
     );
 
@@ -714,6 +730,21 @@ export default function MapScreen() {
     });
   }, [selectedLot, weatherCode, predictionNowMs, calendarSignals, campusLoadBuckets]);
 
+  const selectedLotLatestPhotoUri = useMemo(() => {
+    if (!selectedLot) {
+      return null;
+    }
+
+    const mergedReports = mergeReportsForPrediction(
+      firestoreReportsByLot[selectedLot.id] || [],
+      crowdsourceReports[selectedLot.id],
+      predictionNowMs
+    );
+
+    const latestPhotoReport = mergedReports.find((report) => Boolean(getReportPhotoUri(report)));
+    return latestPhotoReport ? getReportPhotoUri(latestPhotoReport) : null;
+  }, [selectedLot, firestoreReportsByLot, crowdsourceReports, predictionNowMs]);
+
   const loadWeather = async () => {
     try {
       // If location permission is denied, still show weather from Halifax fallback.
@@ -829,6 +860,14 @@ export default function MapScreen() {
     // Remember whether list is expanded or hidden.
     void saveLotListVisible(isLotListVisible);
   }, [isLotListVisible]);
+
+  useEffect(() => {
+    Animated.timing(lotListAnimation, {
+      toValue: isLotListVisible ? 1 : 0,
+      duration: 180,
+      useNativeDriver: false,
+    }).start();
+  }, [isLotListVisible, lotListAnimation]);
 
   useEffect(() => {
     if (!hasHydratedPreferences.current) {
@@ -965,6 +1004,28 @@ export default function MapScreen() {
       }),
     [selectedLot, sheetMaxOffset]
   );
+
+  const lotListAnimatedStyle = {
+    height: lotListAnimation.interpolate({
+      inputRange: [0, 1],
+      outputRange: [0, lotListMaxHeight],
+      extrapolate: 'clamp',
+    }),
+    opacity: lotListAnimation.interpolate({
+      inputRange: [0, 1],
+      outputRange: [0, 1],
+      extrapolate: 'clamp',
+    }),
+    transform: [
+      {
+        translateY: lotListAnimation.interpolate({
+          inputRange: [0, 1],
+          outputRange: [-8, 0],
+          extrapolate: 'clamp',
+        }),
+      },
+    ],
+  };
 
   return (
     <View style={styles.container}>
@@ -1130,13 +1191,16 @@ export default function MapScreen() {
           </View>
         </View>
 
-        {isLotListVisible ? (
-          <View style={styles.lotListCard}>
+        <Animated.View
+          pointerEvents={isLotListVisible ? 'auto' : 'none'}
+          style={[styles.lotListCardWrapper, lotListAnimatedStyle]}
+        >
+          <View style={[styles.lotListCard, { maxHeight: lotListMaxHeight }]}>
             <ScrollView
               keyboardShouldPersistTaps="handled"
               nestedScrollEnabled
               showsVerticalScrollIndicator={false}
-              style={styles.lotListScroll}
+              style={[styles.lotListScroll, { maxHeight: lotListMaxHeight }]}
             >
               {searchableLots.length === 0 ? (
                 <Text style={styles.emptyListText}>No parking lot matches your search.</Text>
@@ -1177,7 +1241,7 @@ export default function MapScreen() {
               )}
             </ScrollView>
           </View>
-        ) : null}
+        </Animated.View>
       </View>
 
       <Animated.View
@@ -1198,10 +1262,11 @@ export default function MapScreen() {
           canReport={canReportSelectedLot}
           currentTimeMs={predictionNowMs}
           dragHandleProps={sheetPanResponder.panHandlers}
+          latestPhotoUri={selectedLotLatestPhotoUri}
           lot={selectedLot}
           predictedStatus={selectedLot ? lotPredictions[selectedLot.id] : null}
           reportDisabledMessage={reportDisabledMessage}
-          scrollEnabled={false}
+          scrollEnabled
           timelineScores={selectedLotTimelineScores}
           onClose={handleCloseSheet}
           onNavigate={handleNavigate}
@@ -1304,6 +1369,9 @@ const styles = StyleSheet.create({
     color: appTheme.color.textPrimary,
     fontSize: appTheme.typography.size.xs,
     fontWeight: '700',
+  },
+  lotListCardWrapper: {
+    overflow: 'hidden',
   },
   lotListCard: {
     maxHeight: 280,

@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Image, Modal, Pressable, RefreshControl, SectionList, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { collection, getDocs, limit, orderBy, query } from 'firebase/firestore';
+import { onAuthStateChanged } from 'firebase/auth';
+import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
 import { auth, db } from '../config/firebase';
 import { appTheme, componentMetrics } from '../theme/tokens';
 import { getReportTrustLabel, getReportVoteMeta, loadUserReportVotes, toggleReportVote } from '../utils/reportVotes';
@@ -54,33 +55,58 @@ export default function HistoryScreen() {
   const [bigImg, setBigImg] = useState(null);
   const [userVotes, setUserVotes] = useState({});
   const [pendingVotes, setPendingVotes] = useState({});
-  const currentUser = auth.currentUser;
+  const [currentUser, setCurrentUser] = useState(auth.currentUser);
 
   const pull = useCallback(async () => {
     try {
-      const reportsQuery = query(
-        collection(db, 'reports'),
-        orderBy('createdAt', 'desc'),
-        limit(REPORTS_HISTORY_LIMIT)
-      );
-      const [snap, voteMap] = await Promise.all([
-        getDocs(reportsQuery),
-        loadUserReportVotes(currentUser?.uid),
-      ]);
-      const rows = snap.docs
-        .map((d) => ({ id: d.id, ...d.data() }))
-        .sort((a, b) => toTimestampMs(getReportCreatedAt(b)) - toTimestampMs(getReportCreatedAt(a)));
-      setItems(rows);
+      if (!currentUser?.uid) {
+        setUserVotes({});
+        return;
+      }
+
+      const voteMap = await loadUserReportVotes(currentUser?.uid);
       setUserVotes(voteMap);
     } catch (_e) {
-      setItems([]);
       setUserVotes({});
-    } finally {
-      setBusy(false);
     }
   }, [currentUser?.uid]);
 
-  useEffect(() => { pull(); }, [pull]);
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
+      setCurrentUser(nextUser);
+    });
+
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const reportsQuery = query(
+      collection(db, 'reports'),
+      orderBy('clientCreatedAt', 'desc'),
+      limit(REPORTS_HISTORY_LIMIT)
+    );
+
+    return onSnapshot(
+      reportsQuery,
+      (snapshot) => {
+        const rows = snapshot.docs
+          .map((d) => ({ id: d.id, ...d.data() }))
+          .sort((a, b) => toTimestampMs(getReportCreatedAt(b)) - toTimestampMs(getReportCreatedAt(a)));
+        setItems(rows);
+        setBusy(false);
+        setRefreshing(false);
+      },
+      () => {
+        setItems([]);
+        setBusy(false);
+        setRefreshing(false);
+      }
+    );
+  }, []);
+
+  useEffect(() => {
+    pull();
+  }, [pull]);
 
   const sections = useMemo(() => {
     const cutoff = Date.now() - ONE_HR;

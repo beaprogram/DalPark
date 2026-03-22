@@ -5,12 +5,12 @@ import { getFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 
 const firebaseConfig = {
-  apiKey: "AIzaSyAJK5bzMRAS4JMUPpOLHkZfiO49BFPIJQk",
-  authDomain: "dalparkaid.firebaseapp.com",
-  projectId: "dalparkaid",
-  storageBucket: "dalparkaid.firebasestorage.app",
-  messagingSenderId: "484151922531",
-  appId: "1:484151922531:web:8185205a269b1e95be8d56"
+  apiKey: "AIzaSyDrZZHzp8u4jdZn5k5xoJCvQqC9BXw7JlE",
+  authDomain: "dalparking-19789.firebaseapp.com",
+  projectId: "dalparking-19789",
+  storageBucket: "dalparking-19789.firebasestorage.app",
+  messagingSenderId: "267186162003",
+  appId: "1:267186162003:web:1a5522a2e5e351104739a6"
 };
 
 const app = initializeApp(firebaseConfig);

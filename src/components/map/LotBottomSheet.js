@@ -1,5 +1,6 @@
-import React from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
 import { STATUS_META } from '../../constants/statusStyle';
 import { appTheme, componentMetrics } from '../../theme/tokens';
@@ -10,6 +11,7 @@ const formatUpdatedAt = (timestamp) => {
   if (!timestamp) {
     return null;
   }
+
   return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 };
 
@@ -51,6 +53,7 @@ export default function LotBottomSheet({
   visible,
   lot,
   predictedStatus,
+  latestPhotoUri = null,
   canReport = true,
   currentTimeMs = Date.now(),
   reportDisabledMessage = '',
@@ -61,191 +64,234 @@ export default function LotBottomSheet({
   onNavigate,
   onReport,
 }) {
+  const [activePage, setActivePage] = useState(0);
+  const [pagerWidth, setPagerWidth] = useState(0);
+  const pagerRef = useRef(null);
+
+  useEffect(() => {
+    setActivePage(0);
+    requestAnimationFrame(() => {
+      pagerRef.current?.scrollTo({ x: 0, animated: false });
+    });
+  }, [lot?.id]);
+
   if (!visible || !lot) {
     return null;
   }
 
   const status = predictedStatus?.status || lot.lastStatus;
-  const statusMeta = STATUS_META[status];
+  const statusMeta = STATUS_META[status] || STATUS_META.UNKNOWN;
   const clampedScore = clampScore(predictedStatus?.score);
   const dayTotal = (lot.generalSpaces || 0) + (lot.reservedSpaces || 0) + (lot.shortTermSpaces || 0);
   const eveningTotal = (lot.eveningGeneralSpaces || 0) + (lot.eveningShortTermSpaces || 0);
   const dayEst = Math.round((dayTotal * clampedScore) / 100);
   const eveEst = Math.round((eveningTotal * clampedScore) / 100);
-  const eveningNow = isEveningTime();
-  const activePeriodLabel = eveningNow ? 'Evening' : 'Day';
+  const eveningNow = isEveningTime(new Date(currentTimeMs || Date.now()));
+  const activePeriodLabel = eveningNow ? 'Evening availability' : 'Daytime availability';
   const activeEst = eveningNow ? eveEst : dayEst;
   const activeTotal = eveningNow ? eveningTotal : dayTotal;
+  const activeIconName = eveningNow ? 'moon-outline' : 'sunny-outline';
   const updatedAt = predictedStatus?.updatedAt || lot.lastStatusAt;
-  const updatedSource = predictedStatus?.updatedBy || (lot.lastStatusAt ? 'Crowd' : null);
-  const updatedText = updatedAt && updatedSource ? `${updatedSource} ${formatUpdatedAt(updatedAt)}` : null;
-  const engineScore = typeof predictedStatus?.engineScore === 'number' ? clampScore(predictedStatus.engineScore) : null;
-  const crowdScore = typeof predictedStatus?.crowdScore === 'number' ? clampScore(predictedStatus.crowdScore) : null;
-  const reportCount = typeof predictedStatus?.reportCount === 'number' ? predictedStatus.reportCount : 0;
+  const updatedText = updatedAt ? `Last updated ${formatUpdatedAt(updatedAt)}` : null;
   const { normalizedScores: normalizedTimelineScores, minScore: timelineMinScore, range: timelineRange } =
     getTimelineStats(timelineScores);
   const currentDate = new Date(currentTimeMs || Date.now());
   const currentTimelineHour = currentDate.getHours();
+  const pageStyle = pagerWidth > 0 ? { width: pagerWidth } : null;
 
   return (
-    <View {...dragHandleProps} style={styles.container}>
-      <View style={styles.dragArea}>
+    <View style={styles.container}>
+      <View {...dragHandleProps} style={styles.dragArea}>
         <View style={styles.handle} />
         <View style={styles.headerRow}>
           <View style={styles.headerMain}>
-            <Text numberOfLines={1} style={styles.name}>
-              {lot.name}
-            </Text>
+            <View style={styles.titleRow}>
+              <Text numberOfLines={1} style={styles.name}>
+                {lot.name}
+              </Text>
+              <View style={[styles.statusPill, { backgroundColor: statusMeta.color }]}>
+                <Text style={styles.statusPillText}>{statusMeta.label}</Text>
+              </View>
+            </View>
             <Text numberOfLines={1} style={styles.address}>
               {lot.address}
             </Text>
+            {updatedText ? <Text style={styles.updatedText}>{updatedText}</Text> : null}
           </View>
           <Pressable accessibilityLabel="Close lot details" onPress={onClose} style={styles.closeButton}>
-            <Text style={styles.closeText}>Close</Text>
+            <Ionicons color={appTheme.color.textPrimary} name="close" size={18} />
           </Pressable>
         </View>
       </View>
 
-      <ScrollView
-        bounces={false}
-        contentContainerStyle={styles.scrollContent}
-        keyboardShouldPersistTaps="handled"
-        nestedScrollEnabled
-        scrollEnabled={scrollEnabled}
-        showsVerticalScrollIndicator
-        style={styles.scrollView}
+      <View
+        onLayout={(event) => {
+          const nextWidth = Math.round(event.nativeEvent.layout.width);
+          if (nextWidth > 0 && nextWidth !== pagerWidth) {
+            setPagerWidth(nextWidth);
+          }
+        }}
+        style={styles.contentShell}
       >
-        <View style={styles.metaRow}>
-          <View style={[styles.pill, { backgroundColor: statusMeta.color }]}>
-            <Text style={styles.pillText}>{statusMeta.label}</Text>
-          </View>
-          {updatedText ? (
-            <View style={styles.pillMuted}>
-              <Text style={styles.pillMutedText}>Updated {updatedText}</Text>
+        <ScrollView
+          ref={pagerRef}
+          bounces={false}
+          horizontal
+          nestedScrollEnabled
+          onMomentumScrollEnd={(event) => {
+            const nextPage = pagerWidth > 0 ? Math.round(event.nativeEvent.contentOffset.x / pagerWidth) : 0;
+            setActivePage(nextPage);
+          }}
+          pagingEnabled
+          showsHorizontalScrollIndicator={false}
+          style={styles.pager}
+        >
+          <View style={[styles.page, styles.overviewPage, pageStyle]}>
+            <View style={styles.primaryCard}>
+              <View style={styles.primaryCardMain}>
+                <View style={styles.periodIconWrap}>
+                  <Ionicons color={appTheme.color.brandGold} name={activeIconName} size={22} />
+                </View>
+                <View style={styles.primaryCardBody}>
+                  <Text style={styles.primaryLabel}>{activePeriodLabel}</Text>
+                  <View style={styles.primaryValueRow}>
+                    <Text style={styles.primaryValue}>~{activeEst}</Text>
+                    <Text style={styles.primaryValueUnit}>/ {activeTotal}</Text>
+                  </View>
+                  <Text style={styles.primaryCaption}>spots available now</Text>
+                </View>
+              </View>
+              {latestPhotoUri ? (
+                <View style={styles.primaryPhotoWrap}>
+                  <Image resizeMode="cover" source={{ uri: latestPhotoUri }} style={styles.primaryPhoto} />
+                </View>
+              ) : null}
             </View>
-          ) : null}
-        </View>
 
-        <View style={styles.scoreSection}>
-          <View style={styles.scoreHeadingRow}>
-            <Text style={styles.scoreHeading}>Predicted score</Text>
-            <Text style={styles.scoreValue}>{clampedScore}/100</Text>
-          </View>
-          <View style={styles.scoreTrack}>
-            <Svg height="10" style={StyleSheet.absoluteFill} width="100%">
-              <Defs>
-                <LinearGradient id="scoreGrad" x1="0%" x2="100%" y1="0%" y2="0%">
-                  <Stop offset="0%" stopColor={appTheme.color.status.FULL} />
-                  <Stop offset="50%" stopColor={appTheme.color.status.CROWDED} />
-                  <Stop offset="100%" stopColor={appTheme.color.status.EMPTY} />
-                </LinearGradient>
-              </Defs>
-              <Rect fill="url(#scoreGrad)" height="10" rx="5" ry="5" width="100%" x="0" y="0" />
-            </Svg>
-            <View
-              style={[
-                styles.scorePointer,
-                {
-                  left: `${clampedScore}%`,
-                  backgroundColor: scoreColor(clampedScore),
-                },
-              ]}
-            />
-          </View>
-          <View style={styles.scoreCaptionRow}>
-            <Text style={styles.scoreCaption}>Packed</Text>
-            <Text style={styles.scoreCaption}>More Available</Text>
-          </View>
-          {crowdScore !== null ? (
-            <Text style={styles.scoreDetailLine}>
-              Engine {engineScore ?? '--'} | Crowd {crowdScore} | {reportCount} recent report{reportCount === 1 ? '' : 's'}
-            </Text>
-          ) : engineScore !== null ? (
-            <Text style={styles.scoreDetailLine}>Engine {engineScore} | No recent crowd reports yet</Text>
-          ) : null}
-        </View>
+            {timelineScores.length > 0 ? (
+              <View style={styles.timelineSection}>
+                <Text style={styles.timelineTitle}>Today</Text>
+                <View style={styles.timelineBars}>
+                  {normalizedTimelineScores.map((score, index) => (
+                    (() => {
+                      const isCurrentSlot = index === currentTimelineHour;
+                      const isPastSlot = index < currentTimelineHour;
 
-        <View style={styles.infoGrid}>
-          <View style={styles.infoItem}>
-            <Text style={styles.infoLabel}>Day Total</Text>
-            <Text style={styles.infoValue}>{dayTotal}</Text>
-            <Text style={styles.infoSubText}>
-              {eveningNow ? 'Est. available: inactive now' : `Est. available: ~${dayEst}`}
-            </Text>
+                      return (
+                    <View
+                      key={`timeline-${index}`}
+                      style={[
+                        styles.timelineSlot,
+                        isCurrentSlot && styles.timelineSlotCurrent,
+                        isPastSlot && styles.timelineSlotPast,
+                      ]}
+                    >
+                      <View
+                        style={[
+                          styles.timelineTrack,
+                          isCurrentSlot && styles.timelineTrackCurrent,
+                          isPastSlot && styles.timelineTrackPast,
+                          index === 7 && styles.timelinePhaseDivider,
+                          index === 17 && styles.timelinePhaseDivider,
+                        ]}
+                      />
+                      <View
+                        style={[
+                          styles.timelineBar,
+                          isCurrentSlot && styles.timelineBarCurrent,
+                          isPastSlot && styles.timelineBarPast,
+                          {
+                            height: getTimelineBarHeight(score, timelineMinScore, timelineRange),
+                            backgroundColor: scoreColor(score),
+                          },
+                        ]}
+                      />
+                    </View>
+                      );
+                    })()
+                  ))}
+                </View>
+                <View style={styles.timelineLabelRow}>
+                  <Text style={styles.timelineLabel}>00:00</Text>
+                  <Text style={styles.timelineLabel}>08:00</Text>
+                  <Text style={styles.timelineLabel}>17:00</Text>
+                  <Text style={styles.timelineLabel}>23:00</Text>
+                </View>
+              </View>
+            ) : null}
           </View>
-          <View style={styles.infoItem}>
-            <Text style={styles.infoLabel}>Evening Total</Text>
-            <Text style={styles.infoValue}>{eveningTotal}</Text>
-            <Text style={styles.infoSubText}>
-              {eveningNow ? `Est. available: ~${eveEst}` : 'Est. available: inactive now'}
-            </Text>
-          </View>
-        </View>
-        <Text style={styles.periodLine}>
-          Est. available now ({activePeriodLabel}): ~{activeEst}/{activeTotal}
-        </Text>
 
-        <Text style={styles.detailLine}>
-          General {lot.generalSpaces || 0} / Reserved {lot.reservedSpaces || 0} / Short-term {lot.shortTermSpaces || 0}
-        </Text>
-        <Text style={styles.detailLine}>
-          Evening General {lot.eveningGeneralSpaces || 0} / Evening Short-term {lot.eveningShortTermSpaces || 0}
-        </Text>
-
-        {timelineScores.length > 0 ? (
-          <View style={styles.timelineSection}>
-            <View style={styles.timelineHeader}>
-              <Text style={styles.timelineTitle}>24h Predicted Availability</Text>
-            </View>
-            <View style={styles.timelineBars}>
-              {normalizedTimelineScores.map((score, index) => (
-                <View
-                  key={`timeline-${index}`}
-                  style={[styles.timelineSlot, index === currentTimelineHour && styles.timelineSlotCurrent]}
-                >
+          <View style={[styles.page, pageStyle]}>
+            <View style={styles.detailsPanel}>
+              <View style={styles.scoreSection}>
+                <View style={styles.scoreHeadingRow}>
+                  <Text style={styles.scoreHeading}>Prediction score</Text>
+                  <Text style={styles.scoreValue}>{clampedScore}/100</Text>
+                </View>
+                <View style={styles.scoreTrack}>
+                  <Svg height="14" style={StyleSheet.absoluteFill} width="100%">
+                    <Defs>
+                      <LinearGradient id="detailScoreGrad" x1="0%" x2="100%" y1="0%" y2="0%">
+                        <Stop offset="0%" stopColor={appTheme.color.status.FULL} />
+                        <Stop offset="50%" stopColor={appTheme.color.status.CROWDED} />
+                        <Stop offset="100%" stopColor={appTheme.color.status.EMPTY} />
+                      </LinearGradient>
+                    </Defs>
+                    <Rect fill="url(#detailScoreGrad)" height="10" rx="5" ry="5" width="100%" x="0" y="2" />
+                  </Svg>
                   <View
                     style={[
-                      styles.timelineTrack,
-                      index === currentTimelineHour && styles.timelineTrackCurrent,
-                      index === 7 && styles.timelinePhaseDivider,
-                      index === 17 && styles.timelinePhaseDivider,
-                    ]}
-                  />
-                  <View
-                    style={[
-                      styles.timelineBar,
-                      index === currentTimelineHour && styles.timelineBarCurrent,
+                      styles.scorePointer,
                       {
-                        height: getTimelineBarHeight(score, timelineMinScore, timelineRange),
-                        backgroundColor: scoreColor(score),
+                        left: `${clampedScore}%`,
+                        backgroundColor: scoreColor(clampedScore),
                       },
                     ]}
                   />
                 </View>
-              ))}
-            </View>
-            <View style={styles.timelineLabelRow}>
-              <Text style={styles.timelineLabel}>00:00</Text>
-              <Text style={styles.timelineLabel}>08:00</Text>
-              <Text style={styles.timelineLabel}>17:00</Text>
-              <Text style={styles.timelineLabel}>23:00</Text>
+                <View style={styles.scoreCaptionRow}>
+                  <Text style={styles.scoreCaption}>Packed</Text>
+                  <Text style={styles.scoreCaption}>More Available</Text>
+                </View>
+              </View>
+
+              <View style={styles.detailsGrid}>
+                <View style={styles.detailsItem}>
+                  <Text style={styles.detailsItemLabel}>Day</Text>
+                  <Text style={styles.detailsItemValue}>{dayTotal}</Text>
+                </View>
+                <View style={styles.detailsItem}>
+                  <Text style={styles.detailsItemLabel}>Evening</Text>
+                  <Text style={styles.detailsItemValue}>{eveningTotal}</Text>
+                </View>
+              </View>
+
+              <Text style={styles.detailsLine}>
+                General {lot.generalSpaces || 0} | Reserved {lot.reservedSpaces || 0} | Short-term {lot.shortTermSpaces || 0}
+              </Text>
+              <Text style={styles.detailsLine}>
+                Evening General {lot.eveningGeneralSpaces || 0} | Evening Short-term {lot.eveningShortTermSpaces || 0}
+              </Text>
             </View>
           </View>
-        ) : null}
+        </ScrollView>
+      </View>
 
+      <View style={styles.pageDotRow}>
+        <View style={[styles.pageDot, activePage === 0 && styles.pageDotActive]} />
+        <View style={[styles.pageDot, activePage === 1 && styles.pageDotActive]} />
+      </View>
+
+      <View style={styles.scrollContent}>
         <View style={styles.actionRow}>
           <PrimaryButton accessibilityLabel="Navigate to lot" label="Navigate" onPress={onNavigate} style={styles.actionPrimary} />
-          <Pressable
-            accessibilityLabel="Report lot status"
-            disabled={!canReport}
-            onPress={onReport}
-            style={[styles.actionSecondary, !canReport && styles.actionSecondaryDisabled]}
-          >
-            <Text style={styles.actionSecondaryText}>Report Status</Text>
-          </Pressable>
+          {canReport ? (
+            <Pressable accessibilityLabel="Report lot status" onPress={onReport} style={styles.actionSecondary}>
+              <Text style={styles.actionSecondaryText}>Report Status</Text>
+            </Pressable>
+          ) : null}
         </View>
-        {!canReport && reportDisabledMessage ? <Text style={styles.reportHint}>{reportDisabledMessage}</Text> : null}
-      </ScrollView>
+      </View>
     </View>
   );
 }
@@ -261,11 +307,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: componentMetrics.horizontalPadding,
     overflow: 'hidden',
   },
-  scrollView: {
+  contentShell: {
     flex: 1,
   },
   scrollContent: {
     paddingBottom: componentMetrics.bottomSafePadding + appTheme.spacing.sm,
+  },
+  pager: {
+    flex: 1,
+  },
+  page: {
+    flex: 1,
+  },
+  overviewPage: {
+    justifyContent: 'flex-end',
+    paddingBottom: appTheme.spacing.xs,
   },
   dragArea: {
     paddingTop: appTheme.spacing.sm,
@@ -282,165 +338,153 @@ const styles = StyleSheet.create({
   headerRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: appTheme.spacing.sm,
+    alignItems: 'flex-start',
+    marginBottom: appTheme.spacing.md,
     gap: appTheme.spacing.sm,
   },
   headerMain: {
     flex: 1,
   },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 6,
+  },
   name: {
     color: appTheme.color.textPrimary,
-    fontSize: appTheme.typography.size.lg,
+    fontSize: 18,
     fontWeight: '700',
+    flexShrink: 1,
   },
   address: {
     color: appTheme.color.textSecondary,
-    fontSize: appTheme.typography.size.sm,
-    marginTop: 2,
+    fontSize: 13,
+    marginTop: 4,
+  },
+  updatedText: {
+    color: appTheme.color.textSecondary,
+    fontSize: 12,
+    marginTop: 6,
+  },
+  statusPill: {
+    borderRadius: appTheme.radius.md,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  statusPillText: {
+    color: appTheme.color.bgCanvas,
+    fontSize: 12,
+    fontWeight: '700',
   },
   closeButton: {
-    minHeight: componentMetrics.touchTargetMin,
-    minWidth: componentMetrics.touchTargetMin,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
     justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: appTheme.spacing.sm,
-  },
-  closeText: {
-    color: appTheme.color.textSecondary,
-    fontSize: appTheme.typography.size.sm,
-    fontWeight: '600',
-  },
-  metaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: appTheme.spacing.sm,
-    marginBottom: appTheme.spacing.sm,
-  },
-  pill: {
-    borderRadius: appTheme.radius.md,
-    paddingHorizontal: appTheme.spacing.sm,
-    paddingVertical: 6,
-  },
-  pillText: {
-    color: appTheme.color.bgCanvas,
-    fontSize: appTheme.typography.size.xs,
-    fontWeight: '700',
-  },
-  pillMuted: {
-    borderRadius: appTheme.radius.md,
     backgroundColor: appTheme.color.bgSurface,
-    paddingHorizontal: appTheme.spacing.sm,
-    paddingVertical: 6,
-  },
-  pillMutedText: {
-    color: appTheme.color.textSecondary,
-    fontSize: appTheme.typography.size.xs,
-  },
-  scoreSection: {
-    marginBottom: appTheme.spacing.md,
-  },
-  scoreHeadingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: appTheme.spacing.xs,
-  },
-  scoreHeading: {
-    color: appTheme.color.textSecondary,
-    fontSize: appTheme.typography.size.xs,
-  },
-  scoreValue: {
-    color: appTheme.color.textPrimary,
-    fontSize: appTheme.typography.size.sm,
-    fontWeight: '700',
-  },
-  scoreTrack: {
-    position: 'relative',
-    height: 10,
-    borderRadius: 5,
-    overflow: 'visible',
-  },
-  scorePointer: {
-    position: 'absolute',
-    top: -4,
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    borderWidth: 2,
-    borderColor: '#FFFFFF',
-    transform: [{ translateX: -9 }],
-  },
-  scoreCaptionRow: {
-    marginTop: appTheme.spacing.xs,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  scoreCaption: {
-    color: appTheme.color.textSecondary,
-    fontSize: 11,
-  },
-  scoreDetailLine: {
-    marginTop: appTheme.spacing.xs,
-    color: appTheme.color.textSecondary,
-    fontSize: appTheme.typography.size.xs,
-  },
-  infoGrid: {
-    flexDirection: 'row',
-    gap: appTheme.spacing.sm,
-  },
-  infoItem: {
-    flex: 1,
     borderWidth: 1,
     borderColor: appTheme.color.borderDefault,
-    borderRadius: appTheme.radius.md,
-    backgroundColor: appTheme.color.bgSurface,
-    padding: appTheme.spacing.sm,
   },
-  infoLabel: {
-    color: appTheme.color.textSecondary,
-    fontSize: appTheme.typography.size.xs,
-    marginBottom: 2,
+  pageDotRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 2,
+    marginBottom: 4,
   },
-  infoValue: {
-    color: appTheme.color.textPrimary,
-    fontSize: appTheme.typography.size.md,
-    fontWeight: '600',
+  pageDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: 'rgba(255,255,255,0.18)',
   },
-  infoSubText: {
-    marginTop: 4,
-    color: appTheme.color.textSecondary,
-    fontSize: appTheme.typography.size.xs,
+  pageDotActive: {
+    width: 18,
+    backgroundColor: 'rgba(242, 201, 76, 0.82)',
   },
-  periodLine: {
-    marginTop: appTheme.spacing.sm,
-    color: appTheme.color.textPrimary,
-    fontSize: appTheme.typography.size.sm,
-    fontWeight: '600',
-  },
-  detailLine: {
-    marginTop: appTheme.spacing.sm,
-    color: appTheme.color.textSecondary,
-    fontSize: appTheme.typography.size.xs,
-  },
-  timelineSection: {
-    marginTop: appTheme.spacing.md,
-  },
-  timelineHeader: {
+  primaryCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: appTheme.spacing.xs,
+    gap: appTheme.spacing.md,
+    padding: appTheme.spacing.md,
+    minHeight: 124,
+    borderRadius: appTheme.radius.lg,
+    borderWidth: 1,
+    borderColor: appTheme.color.borderDefault,
+    backgroundColor: appTheme.color.bgSurface,
+    marginBottom: appTheme.spacing.md,
+  },
+  primaryCardMain: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: appTheme.spacing.md,
+  },
+  periodIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(242, 201, 76, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(242, 201, 76, 0.25)',
+  },
+  primaryCardBody: {
+    flex: 1,
+  },
+  primaryLabel: {
+    color: appTheme.color.textSecondary,
+    fontSize: 12,
+    marginBottom: 4,
+  },
+  primaryValueRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 4,
+  },
+  primaryValue: {
+    color: appTheme.color.textPrimary,
+    fontSize: 32,
+    fontWeight: '700',
+    lineHeight: 36,
+  },
+  primaryValueUnit: {
+    color: appTheme.color.textPrimary,
+    fontSize: 18,
+    fontWeight: '600',
+    lineHeight: 24,
+    marginBottom: 2,
+  },
+  primaryCaption: {
+    color: appTheme.color.textSecondary,
+    fontSize: 12,
+    marginTop: 2,
+  },
+  primaryPhotoWrap: {
+    width: 128,
+    height: 88,
+    borderRadius: appTheme.radius.md,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: appTheme.color.borderDefault,
+    backgroundColor: appTheme.color.bgElevated,
+  },
+  primaryPhoto: {
+    width: '100%',
+    height: '100%',
+  },
+  timelineSection: {
+    marginBottom: appTheme.spacing.md,
   },
   timelineTitle: {
-    color: appTheme.color.textSecondary,
-    fontSize: appTheme.typography.size.xs,
-  },
-  timelineRangeText: {
-    color: appTheme.color.textSecondary,
-    fontSize: 11,
+    color: appTheme.color.textPrimary,
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: appTheme.spacing.xs,
   },
   timelineBars: {
     flexDirection: 'row',
@@ -469,6 +513,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(242, 201, 76, 0.55)',
   },
+  timelineSlotPast: {
+    backgroundColor: 'rgba(255,255,255,0.03)',
+  },
   timelineTrack: {
     position: 'absolute',
     bottom: 0,
@@ -479,6 +526,9 @@ const styles = StyleSheet.create({
   },
   timelineTrackCurrent: {
     backgroundColor: 'rgba(242, 201, 76, 0.28)',
+  },
+  timelineTrackPast: {
+    backgroundColor: 'rgba(255,255,255,0.05)',
   },
   timelinePhaseDivider: {
     borderLeftWidth: 1,
@@ -493,6 +543,9 @@ const styles = StyleSheet.create({
     width: 6,
     borderRadius: 4,
   },
+  timelineBarPast: {
+    opacity: 0.42,
+  },
   timelineLabelRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -505,7 +558,7 @@ const styles = StyleSheet.create({
   actionRow: {
     flexDirection: 'row',
     gap: appTheme.spacing.sm,
-    marginTop: appTheme.spacing.md,
+    marginBottom: 1,
     alignItems: 'center',
   },
   actionPrimary: {
@@ -521,17 +574,89 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  actionSecondaryDisabled: {
-    opacity: 0.5,
-  },
   actionSecondaryText: {
     color: appTheme.color.textPrimary,
-    fontSize: appTheme.typography.size.sm,
+    fontSize: 14,
     fontWeight: '600',
   },
-  reportHint: {
-    marginTop: appTheme.spacing.xs,
+  scoreSection: {
+    marginBottom: appTheme.spacing.sm,
+  },
+  scoreHeadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: appTheme.spacing.xs,
+  },
+  scoreHeading: {
     color: appTheme.color.textSecondary,
-    fontSize: appTheme.typography.size.xs,
+    fontSize: 12,
+  },
+  scoreValue: {
+    color: appTheme.color.textPrimary,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  scoreTrack: {
+    position: 'relative',
+    height: 14,
+    borderRadius: 7,
+    overflow: 'hidden',
+  },
+  scorePointer: {
+    position: 'absolute',
+    top: 1,
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    transform: [{ translateX: -6 }],
+  },
+  scoreCaptionRow: {
+    marginTop: appTheme.spacing.xs,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  scoreCaption: {
+    color: appTheme.color.textSecondary,
+    fontSize: 11,
+  },
+  detailsPanel: {
+    marginBottom: appTheme.spacing.md,
+    borderWidth: 1,
+    borderColor: appTheme.color.borderDefault,
+    borderRadius: appTheme.radius.md,
+    backgroundColor: appTheme.color.bgSurface,
+    padding: appTheme.spacing.md,
+    gap: appTheme.spacing.sm,
+  },
+  detailsGrid: {
+    flexDirection: 'row',
+    gap: appTheme.spacing.sm,
+  },
+  detailsItem: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: appTheme.color.borderDefault,
+    borderRadius: appTheme.radius.sm,
+    backgroundColor: appTheme.color.bgElevated,
+    padding: appTheme.spacing.sm,
+  },
+  detailsItemLabel: {
+    color: appTheme.color.textSecondary,
+    fontSize: 12,
+    marginBottom: 4,
+  },
+  detailsItemValue: {
+    color: appTheme.color.textPrimary,
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  detailsLine: {
+    color: appTheme.color.textSecondary,
+    fontSize: 12,
+    lineHeight: 18,
   },
 });

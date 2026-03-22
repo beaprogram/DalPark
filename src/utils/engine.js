@@ -272,7 +272,13 @@ export const scoreToStatus = (n) => {
   return 'UNKNOWN';
 };
 
-export const isEveningTime = (date = new Date()) => date.getHours() >= 17;
+const EVENING_START_HOUR = 17;
+const DAYTIME_START_HOUR = 6;
+
+export const isEveningTime = (date = new Date()) => {
+  const hour = date.getHours();
+  return hour >= EVENING_START_HOUR || hour < DAYTIME_START_HOUR;
+};
 
 export const getCapacityForCurrentPeriod = (lot, date = new Date()) => {
   if (isEveningTime(date)) {
