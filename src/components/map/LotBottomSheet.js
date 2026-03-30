@@ -66,6 +66,7 @@ export default function LotBottomSheet({
 }) {
   const [activePage, setActivePage] = useState(0);
   const [pagerWidth, setPagerWidth] = useState(0);
+  const [scoreTrackWidth, setScoreTrackWidth] = useState(0);
   const pagerRef = useRef(null);
 
   useEffect(() => {
@@ -98,6 +99,7 @@ export default function LotBottomSheet({
   const currentDate = new Date(currentTimeMs || Date.now());
   const currentTimelineHour = currentDate.getHours();
   const pageStyle = pagerWidth > 0 ? { width: pagerWidth } : null;
+  const gradientId = `detailScoreGrad-${lot?.id || 'lot'}`;
 
   return (
     <View style={styles.container}>
@@ -228,17 +230,27 @@ export default function LotBottomSheet({
                   <Text style={styles.scoreHeading}>Prediction score</Text>
                   <Text style={styles.scoreValue}>{clampedScore}/100</Text>
                 </View>
-                <View style={styles.scoreTrack}>
-                  <Svg height="14" style={StyleSheet.absoluteFill} width="100%">
+                <View
+                  onLayout={(event) => {
+                    const nextWidth = Math.round(event.nativeEvent.layout.width);
+                    if (nextWidth > 0 && nextWidth !== scoreTrackWidth) {
+                      setScoreTrackWidth(nextWidth);
+                    }
+                  }}
+                  style={styles.scoreTrack}
+                >
+                  {scoreTrackWidth > 0 ? (
+                    <Svg height={14} style={styles.scoreSvg} width={scoreTrackWidth}>
                     <Defs>
-                      <LinearGradient id="detailScoreGrad" x1="0%" x2="100%" y1="0%" y2="0%">
+                        <LinearGradient id={gradientId} x1="0%" x2="100%" y1="0%" y2="0%">
                         <Stop offset="0%" stopColor={appTheme.color.status.FULL} />
                         <Stop offset="50%" stopColor={appTheme.color.status.CROWDED} />
                         <Stop offset="100%" stopColor={appTheme.color.status.EMPTY} />
-                      </LinearGradient>
+                        </LinearGradient>
                     </Defs>
-                    <Rect fill="url(#detailScoreGrad)" height="10" rx="5" ry="5" width="100%" x="0" y="2" />
-                  </Svg>
+                      <Rect fill={`url(#${gradientId})`} height="10" rx="5" ry="5" width={scoreTrackWidth} x="0" y="2" />
+                    </Svg>
+                  ) : null}
                   <View
                     style={[
                       styles.scorePointer,
@@ -602,6 +614,11 @@ const styles = StyleSheet.create({
     height: 14,
     borderRadius: 7,
     overflow: 'hidden',
+  },
+  scoreSvg: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
   },
   scorePointer: {
     position: 'absolute',

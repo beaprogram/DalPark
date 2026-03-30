@@ -2,11 +2,15 @@ const BASE_SCORE = 55;
 const RECENT_REPORT_WINDOW_MINS = 90;
 const SHORT_GUARD_MINS = 15;
 const FRESHNESS_DECAY_MINS = 45;
-const MAX_CROWD_ALPHA = 0.85;
+const MAX_CROWD_ALPHA = 0.9;
 const MAX_NEGATIVE_AGE_MINS = 5;
 const CROWD_CONFIDENCE_CURVE_K = 2.2;
 const CROWD_DISAGREEMENT_SCALE = 26;
 const SINGLE_REPORT_SHORT_GUARD_BAND = 38;
+const MAX_RECENT_CROWD_ALPHA_BOOST = 0.2;
+const TIMELINE_RECENT_REPORT_INERTIA_WINDOW_MINS = 45;
+const MAX_TIMELINE_CROWD_CARRY = 0.7;
+const MAX_TIMELINE_CROWD_CARRY_HOURS = 5;
 const PATTERN_LOOKBACK_DAYS = 42;
 const PATTERN_SLOT_HOUR_TOLERANCE = 1;
 const MIN_PATTERN_REPORTS = 3;
@@ -379,6 +383,9 @@ const getTrustWeight = (report) => {
   return 1;
 };
 
+const getTimelineReportTimestampMs = (report) =>
+  toMillis(report?.createdAt) ?? toMillis(report?.clientCreatedAt);
+
 export const getCommunityVoteWeight = (report) => {
   const normalized = toFiniteNumber(report?.voteWeightMultiplier);
   if (normalized == null) {
@@ -649,10 +656,35 @@ const getShortGuardAlphaFloor = (crowd) => {
   );
 
   if ((crowd?.uniqueUserCount || 0) === 1) {
-    alphaFloor = Math.min(alphaFloor, latestReportHasProof ? 0.52 : 0.44);
+    alphaFloor = Math.min(alphaFloor, latestReportHasProof ? 0.72 : 0.6);
   }
 
   return alphaFloor;
+};
+
+const getRecentCrowdAlphaBoost = (crowd) => {
+  if (!crowd || crowd.crowdScore == null || crowd.latestReportAgeMins == null) {
+    return 0;
+  }
+
+  const recencyFactor = clamp01(1 - crowd.latestReportAgeMins / RECENT_REPORT_WINDOW_MINS);
+  const freshnessFactor = clamp01(1 - crowd.latestReportAgeMins / 30);
+  const uniqueUserFactor = clamp01((crowd.uniqueUserCount || 0) / 3);
+  const agreementFactor = 1 - clamp01(crowd.disagreement || 0);
+  const latestReportHasProof = Boolean(crowd?.recentReports?.[0] && hasProof(crowd.recentReports[0]));
+
+  let alphaBoost =
+    0.05 +
+    recencyFactor * 0.07 +
+    freshnessFactor * 0.04 +
+    uniqueUserFactor * 0.03 +
+    agreementFactor * 0.01;
+
+  if (latestReportHasProof) {
+    alphaBoost += 0.02;
+  }
+
+  return clamp(alphaBoost, 0, MAX_RECENT_CROWD_ALPHA_BOOST);
 };
 
 const getShortGuardBand = (crowd) => {
@@ -702,8 +734,9 @@ const combineScores = ({ engineScore, crowd, pattern }) => {
     pattern && pattern.patternConfidence > 0
       ? pattern.patternConfidence * MAX_PATTERN_ALPHA_BOOST * patternAlignment
       : 0;
+  const recentCrowdBoost = getRecentCrowdAlphaBoost(crowd);
 
-  let alpha = crowd.crowdConfidence + patternBoost;
+  let alpha = crowd.crowdConfidence + patternBoost + recentCrowdBoost;
   alpha = Math.min(alpha, MAX_CROWD_ALPHA);
   if (
     crowd.latestReportAgeMins != null &&
@@ -738,6 +771,65 @@ export const summarizeCrowdIntelligence = (reports = [], nowInput = new Date()) 
   };
 };
 
+const getTimelineRecentCrowdCarryStrength = (reports = [], nowInput = new Date()) => {
+  const nowMs = toMillis(nowInput) ?? Date.now();
+  const recentReports = (Array.isArray(reports) ? reports : [])
+    .map((report) => {
+      const createdAtMs = getTimelineReportTimestampMs(report);
+      if (!createdAtMs) {
+        return null;
+      }
+
+      const ageMins = (nowMs - createdAtMs) / 60000;
+      if (!Number.isFinite(ageMins) || ageMins < -MAX_NEGATIVE_AGE_MINS || ageMins > TIMELINE_RECENT_REPORT_INERTIA_WINDOW_MINS) {
+        return null;
+      }
+
+      return {
+        ...report,
+        createdAtMs,
+        ageMins,
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.ageMins - right.ageMins);
+
+  if (!recentReports.length) {
+    return 0;
+  }
+
+  const freshestAgeMins = recentReports[0].ageMins;
+  const freshnessFactor = clamp01(1 - freshestAgeMins / TIMELINE_RECENT_REPORT_INERTIA_WINDOW_MINS);
+  const densityFactor = clamp01(recentReports.length / 3);
+  const proofBonus = recentReports.some((report) => hasProof(report)) ? 0.08 : 0;
+
+  return clamp(
+    0.36 + freshnessFactor * 0.18 + densityFactor * 0.12 + proofBonus,
+    0,
+    MAX_TIMELINE_CROWD_CARRY
+  );
+};
+
+const applyTimelineFutureCarry = (scores = [], currentHour, carryStrength) => {
+  if (!Array.isArray(scores) || scores.length === 0 || carryStrength <= 0) {
+    return Array.isArray(scores) ? scores : [];
+  }
+
+  const nextScores = [...scores];
+  for (let hour = currentHour + 1; hour < nextScores.length; hour += 1) {
+    const hoursAhead = hour - currentHour;
+    const horizonFactor = clamp01(1 - (hoursAhead - 1) / MAX_TIMELINE_CROWD_CARRY_HOURS);
+    const carry = clamp(carryStrength * horizonFactor, 0, MAX_TIMELINE_CROWD_CARRY);
+    if (carry <= 0) {
+      continue;
+    }
+
+    nextScores[hour] = Math.round(nextScores[hour] * (1 - carry) + nextScores[hour - 1] * carry);
+  }
+
+  return nextScores;
+};
+
 export const smoothDisplayScore = (prevDisplayScore, nextScore, options = {}) => {
   if (typeof prevDisplayScore !== 'number' || !Number.isFinite(prevDisplayScore)) {
     return clamp(Math.round(nextScore));
@@ -748,21 +840,31 @@ export const smoothDisplayScore = (prevDisplayScore, nextScore, options = {}) =>
     typeof options?.latestReportAgeMins === 'number' && Number.isFinite(options.latestReportAgeMins)
       ? options.latestReportAgeMins
       : null;
+  const reportCount =
+    typeof options?.reportCount === 'number' && Number.isFinite(options.reportCount)
+      ? options.reportCount
+      : 0;
+  const hasVeryFreshCrowdSignal = latestReportAgeMins != null && latestReportAgeMins <= 10 && reportCount > 0;
 
   let previousWeight = 0.65;
   let nextWeight = 0.35;
 
   if (diff >= 25) {
-    if (latestReportAgeMins != null && latestReportAgeMins <= 10) {
-      previousWeight = 0.2;
-      nextWeight = 0.8;
+    if (hasVeryFreshCrowdSignal) {
+      previousWeight = 0.1;
+      nextWeight = 0.9;
     } else {
       previousWeight = 0.35;
       nextWeight = 0.65;
     }
   } else if (diff >= 10) {
-    previousWeight = 0.4;
-    nextWeight = 0.6;
+    if (hasVeryFreshCrowdSignal) {
+      previousWeight = 0.25;
+      nextWeight = 0.75;
+    } else {
+      previousWeight = 0.4;
+      nextWeight = 0.6;
+    }
   }
 
   return clamp(Math.round(prevDisplayScore * previousWeight + nextScore * nextWeight));
@@ -778,6 +880,39 @@ export const blendWithCrowdsource = (engineScore, reportOrReports) => {
   const crowd = aggregateCrowdReports(reports);
   const pattern = aggregateHistoricalPattern(reports, new Date(), TEACHING_DAY);
   return combineScores({ engineScore, crowd, pattern }).finalScore;
+};
+
+export const predictAvailabilityTimeline = ({
+  lot,
+  weatherCode,
+  startDate = new Date(),
+  reports = [],
+  hours = 24,
+  signalResolver = () => ({}),
+}) => {
+  if (!lot || hours <= 0) {
+    return [];
+  }
+
+  const now = startDate instanceof Date ? startDate : new Date(startDate || Date.now());
+  const currentHour = now.getHours();
+  const currentMinute = now.getMinutes();
+  const rawScores = Array.from({ length: hours }, (_, hour) => {
+    const targetDate = new Date(now);
+    targetDate.setHours(hour, hour === currentHour ? currentMinute : 0, 0, 0);
+    const signalContext = signalResolver(targetDate) || {};
+
+    return predictAvailability({
+      lot,
+      weatherCode,
+      atDate: targetDate,
+      reports,
+      ...signalContext,
+    }).score;
+  });
+  const carryStrength = getTimelineRecentCrowdCarryStrength(reports, now);
+
+  return applyTimelineFutureCarry(rawScores, currentHour, carryStrength);
 };
 
 export const predictAvailability = ({
@@ -808,6 +943,7 @@ export const predictAvailability = ({
   });
   const displayScore = smoothDisplayScore(prevDisplayScore, mixed.finalScore, {
     latestReportAgeMins: crowd.latestReportAgeMins,
+    reportCount: crowd.reportCount,
   });
 
   return {

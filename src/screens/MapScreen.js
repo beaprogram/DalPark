@@ -23,7 +23,7 @@ import {
   saveSelectedLotId,
 } from '../utils/mapPreferencesStorage';
 import { fetchParkingZones } from '../utils/hrmApi';
-import { predictAvailability } from '../utils/engine';
+import { predictAvailability, predictAvailabilityTimeline } from '../utils/engine';
 import { resolveAcademicDayType, resolvePredictionSignals } from '../utils/predictionSignals';
 import ReportModal from '../components/map/ReportModal';
 
@@ -705,45 +705,61 @@ export default function MapScreen() {
     predictionDisplayScoresRef.current = nextDisplayScores;
   }, [lotPredictions]);
 
+  const selectedLotMergedReports = useMemo(() => {
+    if (!selectedLot) {
+      return [];
+    }
+
+    return mergeReportsForPrediction(
+      firestoreReportsByLot[selectedLot.id] || [],
+      crowdsourceReports[selectedLot.id],
+      predictionNowMs
+    );
+  }, [selectedLot, firestoreReportsByLot, crowdsourceReports, predictionNowMs]);
+
+  const selectedLotReportsForPrediction = useMemo(() => {
+    if (!selectedLot) {
+      return [];
+    }
+
+    return enrichReportsForPrediction(selectedLotMergedReports, selectedLot, calendarSignals);
+  }, [selectedLot, selectedLotMergedReports, calendarSignals]);
+
   const selectedLotTimelineScores = useMemo(() => {
     if (!selectedLot) {
       return [];
     }
 
-    const now = new Date(predictionNowMs);
-    return Array.from({ length: 24 }, (_, hour) => {
-      const targetDate = new Date(now);
-      targetDate.setHours(hour, 0, 0, 0);
-      const signalContext = resolvePredictionSignals({
-        date: targetDate,
-        lot: selectedLot,
-        calendarSignals,
-        campusLoadBuckets,
-      });
-      return predictAvailability({
-        lot: selectedLot,
-        weatherCode,
-        atDate: targetDate,
-        reports: [],
-        ...signalContext,
-      }).score;
+    return predictAvailabilityTimeline({
+      lot: selectedLot,
+      weatherCode,
+      startDate: predictionNowMs,
+      reports: selectedLotReportsForPrediction,
+      signalResolver: (targetDate) =>
+        resolvePredictionSignals({
+          date: targetDate,
+          lot: selectedLot,
+          calendarSignals,
+          campusLoadBuckets,
+        }),
     });
-  }, [selectedLot, weatherCode, predictionNowMs, calendarSignals, campusLoadBuckets]);
+  }, [
+    selectedLot,
+    weatherCode,
+    predictionNowMs,
+    calendarSignals,
+    campusLoadBuckets,
+    selectedLotReportsForPrediction,
+  ]);
 
   const selectedLotLatestPhotoUri = useMemo(() => {
     if (!selectedLot) {
       return null;
     }
 
-    const mergedReports = mergeReportsForPrediction(
-      firestoreReportsByLot[selectedLot.id] || [],
-      crowdsourceReports[selectedLot.id],
-      predictionNowMs
-    );
-
-    const latestPhotoReport = mergedReports.find((report) => Boolean(getReportPhotoUri(report)));
+    const latestPhotoReport = selectedLotMergedReports.find((report) => Boolean(getReportPhotoUri(report)));
     return latestPhotoReport ? getReportPhotoUri(latestPhotoReport) : null;
-  }, [selectedLot, firestoreReportsByLot, crowdsourceReports, predictionNowMs]);
+  }, [selectedLot, selectedLotMergedReports]);
 
   const loadWeather = async () => {
     try {
