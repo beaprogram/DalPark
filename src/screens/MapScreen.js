@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Animated, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from 'react-native';
-import MapView, { Circle, Marker, Polygon } from 'react-native-maps';
+import MapView, { Circle, Marker, Polygon, Polyline } from 'react-native-maps';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
@@ -15,6 +15,7 @@ import { appTheme, componentMetrics } from '../theme/tokens';
 import LotBottomSheet from '../components/map/LotBottomSheet';
 import { subscribeLots } from '../utils/lotsFirestore';
 import { openNavigationToCoordinate } from '../utils/navigation';
+import { fetchDrivingRoute } from '../utils/routing';
 import {
   loadMapPreferences,
   saveLotListVisible,
@@ -283,6 +284,24 @@ const mergeReportsForPrediction = (remoteReports = [], localReport, nowMs) => {
 const getReportPhotoUri = (report) =>
   report?.photoUrl || report?.imageUrl || report?.imgUri || null;
 
+const formatDriveDuration = (durationSeconds) => {
+  const totalMinutes = Math.max(0, Math.round((Number(durationSeconds) || 0) / 60));
+  if (totalMinutes < 60) {
+    return `${totalMinutes} min`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes === 0 ? `${hours} hr` : `${hours} hr ${minutes} min`;
+};
+
+const formatDriveDistance = (distanceMeters) => {
+  const meters = Math.max(0, Number(distanceMeters) || 0);
+  if (meters < 1000) {
+    return `${Math.round(meters)} m`;
+  }
+  return `${(meters / 1000).toFixed(1)} km`;
+};
+
 const enrichReportsForPrediction = (reports, lot, calendarSignals) =>
   reports.map((report) => {
     const reportTimestamp = getReportTimestampMs(report);
@@ -321,6 +340,9 @@ export default function MapScreen() {
   const [remoteReports, setRemoteReports] = useState([]);
   const [calendarSignals, setCalendarSignals] = useState(ACADEMIC_CALENDAR_SIGNALS);
   const [campusLoadBuckets, setCampusLoadBuckets] = useState(CAMPUS_LOAD_BUCKETS);
+  const [navigationMode, setNavigationMode] = useState(null);
+  const [isFetchingRoute, setIsFetchingRoute] = useState(false);
+  const [navFollowing, setNavFollowing] = useState(false);
   const sheetMaxHeight = Math.min(windowHeight * 0.58, 480);
   const sheetPeekHeight = Math.min(windowHeight * 0.5, 25);
   const sheetMaxOffset = Math.max(sheetMaxHeight - sheetPeekHeight, 0);
@@ -903,26 +925,122 @@ export default function MapScreen() {
     Alert.alert('Refreshed', 'Parking dataset was refreshed. Weather is currently unavailable.');
   };
 
-  const handleNavigate = async () => {
-    if (!selectedLot) {
-      return;
-    }
-
-    const target = selectedLot.navigationCoordinate || selectedLot.coordinate;
+  const openExternalNavigationFallback = async (lot, { notify = false } = {}) => {
+    const target = lot.navigationCoordinate || lot.coordinate;
     try {
       const opened = await openNavigationToCoordinate({
         latitude: target.latitude,
         longitude: target.longitude,
-        label: selectedLot.name,
+        label: lot.name,
       });
 
       if (!opened) {
         Alert.alert('Navigation Error', 'No map app could be opened on this device.');
+        return;
+      }
+
+      if (notify) {
+        Alert.alert('Showing directions in Google Maps instead', 'In-app routing was unavailable.');
       }
     } catch (_error) {
       Alert.alert('Navigation Error', 'Unable to open navigation right now.');
     }
   };
+
+  const handleNavigate = async () => {
+    if (!selectedLot) return;
+    if (!userCoordinate) {
+      Alert.alert('Location Required', 'Enable location access to show directions on the map.');
+      return;
+    }
+    const target = selectedLot.navigationCoordinate || selectedLot.coordinate;
+    setIsFetchingRoute(true);
+    try {
+      const result = await fetchDrivingRoute({ origin: userCoordinate, destination: target });
+      setNavigationMode({
+        lotId: selectedLot.id,
+        lotName: selectedLot.name,
+        destination: target,
+        routes: result.routes,
+        selectedIndex: result.selectedIndex,
+      });
+      setIsLotListVisible(false);
+      handleCloseSheet();
+    } catch (_error) {
+      await openExternalNavigationFallback(selectedLot, { notify: true });
+    } finally {
+      setIsFetchingRoute(false);
+    }
+  };
+
+  const handleSelectRoute = (index) => {
+    setNavigationMode((prev) => (prev ? { ...prev, selectedIndex: index } : null));
+  };
+
+  const handleEndNavigation = () => {
+    setNavFollowing(false);
+    setNavigationMode(null);
+  };
+
+  const handleStartNavFollow = () => {
+    setNavFollowing(true);
+    if (userCoordinate) {
+      mapRef.current?.animateToRegion({
+        latitude: userCoordinate.latitude,
+        longitude: userCoordinate.longitude,
+        latitudeDelta: 0.003,
+        longitudeDelta: 0.003,
+      }, 800);
+    }
+  };
+
+  useEffect(() => {
+    if (!navigationMode || !userCoordinate) return;
+    const activeRoute = navigationMode.routes[navigationMode.selectedIndex];
+    const allPoints = activeRoute.coordinates.length > 2
+      ? activeRoute.coordinates
+      : [userCoordinate, navigationMode.destination];
+
+    setTimeout(() => {
+      mapRef.current?.fitToCoordinates(allPoints, {
+        edgePadding: { top: 180, right: 60, bottom: 200, left: 60 },
+        animated: true,
+      });
+    }, 300);
+  }, [navigationMode?.lotId]);
+
+  useEffect(() => {
+    if (!navigationMode) return;
+
+    let locationSub = null;
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') return;
+      locationSub = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.High, distanceInterval: 5, timeInterval: 3000 },
+        (location) => {
+          setUserCoordinate({
+            latitude: location.coords.latitude,
+            longitude: location.coords.longitude,
+          });
+        }
+      );
+    })();
+
+    return () => {
+      if (locationSub) locationSub.remove();
+    };
+  }, [navigationMode?.lotId]);
+
+  useEffect(() => {
+    if (!navigationMode || !userCoordinate || !navFollowing) return;
+    mapRef.current?.animateToRegion({
+      latitude: userCoordinate.latitude,
+      longitude: userCoordinate.longitude,
+      latitudeDelta: 0.003,
+      longitudeDelta: 0.003,
+    }, 800);
+  }, [userCoordinate, navFollowing]);
 
   const handleReport = () => {
     if (!selectedLot) return;
@@ -1049,6 +1167,7 @@ export default function MapScreen() {
         initialRegion={INITIAL_REGION}
         onRegionChange={setMapRegion}
         onRegionChangeComplete={setMapRegion}
+        onPanDrag={() => { if (navFollowing) setNavFollowing(false); }}
         onPress={() => {
           handleCloseSheet();
           setIsLotListVisible(false);
@@ -1066,7 +1185,7 @@ export default function MapScreen() {
         }}
         style={styles.map}
       >
-        {parkingZones.map((zone) => (
+        {!navigationMode ? parkingZones.map((zone) => (
           <Polygon
             coordinates={zone.polygon}
             fillColor={zone.fillColor}
@@ -1076,9 +1195,9 @@ export default function MapScreen() {
             tappable={false}
             zIndex={1}
           />
-        ))}
+        )) : null}
 
-        {showZoneLabels
+        {!navigationMode && showZoneLabels
           ? parkingZones.map((zone) => (
             <Marker
               anchor={{ x: 0.5, y: 0.5 }}
@@ -1105,7 +1224,83 @@ export default function MapScreen() {
           />
         ) : null}
 
+        {navigationMode ? navigationMode.routes.map((route, index) => {
+          if (index === navigationMode.selectedIndex) return null;
+          return (
+            <Polyline
+              key={`alt-route-${index}`}
+              coordinates={route.coordinates}
+              strokeColor="rgba(150, 150, 150, 0.45)"
+              strokeWidth={4}
+              lineDashPattern={[10, 6]}
+              tappable
+              onPress={() => handleSelectRoute(index)}
+              zIndex={2}
+            />
+          );
+        }) : null}
+
+        {navigationMode && navigationMode.routes[navigationMode.selectedIndex] ? (
+          <Polyline
+            coordinates={navigationMode.routes[navigationMode.selectedIndex].coordinates}
+            strokeColor="#F2C94C"
+            strokeWidth={6}
+            zIndex={5}
+          />
+        ) : null}
+
+        {navigationMode && userCoordinate && navigationMode.routes[navigationMode.selectedIndex]?.coordinates?.length > 0 ? (() => {
+          const routeStart = navigationMode.routes[navigationMode.selectedIndex].coordinates[0];
+          return (
+            <Polyline
+              coordinates={[userCoordinate, routeStart]}
+              strokeColor="#9AA0A6"
+              strokeWidth={3}
+              lineDashPattern={[4, 8]}
+              zIndex={3}
+            />
+          );
+        })() : null}
+
+        {navigationMode && navigationMode.routes[navigationMode.selectedIndex]?.coordinates?.length > 1 ? (() => {
+          const coords = navigationMode.routes[navigationMode.selectedIndex].coordinates;
+          const routeEnd = coords[coords.length - 1];
+          const destLatDiff = Math.abs(routeEnd.latitude - navigationMode.destination.latitude);
+          const destLngDiff = Math.abs(routeEnd.longitude - navigationMode.destination.longitude);
+          if (destLatDiff + destLngDiff < 0.00005) return null;
+          return (
+            <Polyline
+              coordinates={[routeEnd, navigationMode.destination]}
+              strokeColor="#9AA0A6"
+              strokeWidth={3}
+              lineDashPattern={[4, 8]}
+              zIndex={3}
+            />
+          );
+        })() : null}
+
+        {navigationMode && userCoordinate ? (
+          <Marker anchor={{ x: 0.5, y: 0.5 }} coordinate={userCoordinate} identifier="nav-origin" tracksViewChanges={false} zIndex={9}>
+            <View style={styles.navOriginOuter}>
+              <View style={styles.navOriginInner} />
+            </View>
+          </Marker>
+        ) : null}
+
+        {navigationMode ? (
+          <Marker
+            coordinate={navigationMode.destination}
+            identifier={`destination-${navigationMode.lotId}`}
+            pinColor="#EA4335"
+            title={navigationMode.lotName}
+            zIndex={9}
+          />
+        ) : null}
+
+
+
         {lots.map((lot) => {
+          if (navigationMode) return null;
           const isSelected = selectedLot?.id === lot.id;
           if (hideParkingMarkersWhenZoomedOut) {
             return null;
@@ -1169,11 +1364,20 @@ export default function MapScreen() {
           <Pressable
             accessibilityLabel="Go to recommended parking lot"
             accessibilityRole="button"
+            disabled={Boolean(navigationMode)}
             hitSlop={6}
             onPress={handleGoToRecommended}
-            style={({ pressed }) => [styles.searchTrailingButton, pressed && styles.iconButtonPressed]}
+            style={({ pressed }) => [
+              styles.searchTrailingButton,
+              pressed && !navigationMode && styles.iconButtonPressed,
+              navigationMode && styles.searchTrailingButtonDisabled,
+            ]}
           >
-            <Ionicons color={appTheme.color.brandGold} name="locate-outline" size={18} />
+            <Ionicons
+              color={navigationMode ? appTheme.color.textSecondary : appTheme.color.brandGold}
+              name="locate-outline"
+              size={18}
+            />
           </Pressable>
           <Pressable
             accessibilityLabel="Refresh lot status"
@@ -1208,8 +1412,8 @@ export default function MapScreen() {
         </View>
 
         <Animated.View
-          pointerEvents={isLotListVisible ? 'auto' : 'none'}
-          style={[styles.lotListCardWrapper, lotListAnimatedStyle]}
+          pointerEvents={isLotListVisible && !navigationMode ? 'auto' : 'none'}
+          style={[styles.lotListCardWrapper, lotListAnimatedStyle, navigationMode && styles.hiddenOverlay]}
         >
           <View style={[styles.lotListCard, { maxHeight: lotListMaxHeight }]}>
             <ScrollView
@@ -1290,6 +1494,41 @@ export default function MapScreen() {
           visible={Boolean(selectedLot)}
         />
       </Animated.View>
+
+      {navigationMode ? (() => {
+        const activeRoute = navigationMode.routes[navigationMode.selectedIndex];
+        return (
+          <View style={[styles.navInfoBar, { bottom: insets.bottom + appTheme.spacing.md }]}>
+            <View style={styles.navInfoMain}>
+              <Text numberOfLines={1} style={styles.navInfoLot}>{navigationMode.lotName}</Text>
+              <View style={styles.navInfoMetrics}>
+                <Ionicons color={appTheme.color.brandGold} name="time-outline" size={14} />
+                <Text style={styles.navInfoMetricText}>{formatDriveDuration(activeRoute.durationSeconds)}</Text>
+                <View style={styles.navInfoMetricDivider} />
+                <Ionicons color={appTheme.color.brandGold} name="navigate-outline" size={14} />
+                <Text style={styles.navInfoMetricText}>{formatDriveDistance(activeRoute.distanceMeters)}</Text>
+                {activeRoute.summary ? (
+                  <>
+                    <View style={styles.navInfoMetricDivider} />
+                    <Text style={styles.navInfoMetricText}>via {activeRoute.summary}</Text>
+                  </>
+                ) : null}
+              </View>
+            </View>
+            <Pressable
+              accessibilityLabel={navFollowing ? "Re-center map" : "Start navigation"}
+              accessibilityRole="button"
+              onPress={handleStartNavFollow}
+              style={({ pressed }) => [styles.navInfoStartBtn, pressed && styles.navInfoStartBtnPressed]}
+            >
+              <Ionicons color="#FFFFFF" name={navFollowing ? "locate" : "navigate"} size={18} />
+            </Pressable>
+            <Pressable accessibilityLabel="End navigation" accessibilityRole="button" onPress={handleEndNavigation} style={({ pressed }) => [styles.navInfoEndBtn, pressed && styles.navInfoEndBtnPressed]}>
+              <Text style={styles.navInfoEndText}>End</Text>
+            </Pressable>
+          </View>
+        );
+      })() : null}
 
       <ReportModal
         visible={reportModalVisible}
@@ -1499,6 +1738,144 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
     paddingHorizontal: 0,
     paddingVertical: 0,
+  },
+  searchTrailingButtonDisabled: {
+    opacity: 0.45,
+  },
+  hiddenOverlay: {
+    opacity: 0,
+  },
+  navOriginOuter: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 3,
+    borderColor: '#4285F4',
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3,
+  },
+  navOriginInner: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#4285F4',
+  },
+  navDestWrap: {
+    alignItems: 'center',
+  },
+  navDestPin: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#EA4335',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.35,
+    shadowRadius: 4,
+  },
+  navDestPinDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#FFFFFF',
+  },
+  navDestStem: {
+    width: 4,
+    height: 8,
+    backgroundColor: '#EA4335',
+  },
+  navDestShadow: {
+    width: 12,
+    height: 4,
+    borderRadius: 6,
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    marginTop: 1,
+  },
+  navInfoBar: {
+    position: 'absolute',
+    left: componentMetrics.horizontalPadding,
+    right: componentMetrics.horizontalPadding,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: appTheme.spacing.sm,
+    backgroundColor: appTheme.color.bgElevated,
+    borderRadius: appTheme.radius.lg,
+    borderWidth: 1,
+    borderColor: appTheme.color.borderDefault,
+    paddingHorizontal: appTheme.spacing.md,
+    paddingVertical: appTheme.spacing.sm,
+    zIndex: 30,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.28,
+    shadowRadius: 6,
+    elevation: 6,
+  },
+  navInfoMain: {
+    flex: 1,
+    gap: 4,
+  },
+  navInfoLot: {
+    color: appTheme.color.textPrimary,
+    fontSize: appTheme.typography.size.md,
+    fontWeight: '700',
+  },
+  navInfoMetrics: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 4,
+  },
+  navInfoMetricText: {
+    color: appTheme.color.textSecondary,
+    fontSize: appTheme.typography.size.xs,
+    fontWeight: '600',
+  },
+  navInfoMetricDivider: {
+    width: 1,
+    height: 12,
+    backgroundColor: appTheme.color.borderDefault,
+    marginHorizontal: 4,
+  },
+  navInfoStartBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#1A73E8',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  navInfoStartBtnPressed: {
+    opacity: 0.85,
+  },
+  navInfoEndBtn: {
+    minHeight: componentMetrics.touchTargetMin,
+    paddingHorizontal: appTheme.spacing.md,
+    borderRadius: appTheme.radius.md,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 107, 0.45)',
+    backgroundColor: 'rgba(255, 107, 107, 0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  navInfoEndBtnPressed: {
+    opacity: 0.85,
+  },
+  navInfoEndText: {
+    color: '#FF9F6B',
+    fontSize: appTheme.typography.size.sm,
+    fontWeight: '700',
   },
   campusLabelText: {
     color: '#FFFFFF',

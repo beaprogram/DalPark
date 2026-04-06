@@ -4,6 +4,16 @@ Pull the code from repo
 run 'npm install'
 run the app using 'npx expo start -c'
 
+## Environment Setup
+
+1. Copy the example env file:
+```
+cp .env.example .env
+```
+2. Fill in the values in `.env` (ask a team member for the keys)
+3. Run `npm install`
+4. Run `npx expo start -c`
+
 Map screen now uses AsyncStorage to persist:
 - last viewed map region
 - search text
