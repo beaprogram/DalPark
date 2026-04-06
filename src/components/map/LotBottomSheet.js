@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import * as Haptics from 'expo-haptics';
 import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
 import { STATUS_META } from '../../constants/statusStyle';
 import { appTheme, componentMetrics } from '../../theme/tokens';
@@ -142,6 +143,7 @@ export default function LotBottomSheet({
           nestedScrollEnabled
           onMomentumScrollEnd={(event) => {
             const nextPage = pagerWidth > 0 ? Math.round(event.nativeEvent.contentOffset.x / pagerWidth) : 0;
+            if (nextPage !== activePage) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
             setActivePage(nextPage);
           }}
           pagingEnabled
@@ -296,9 +298,9 @@ export default function LotBottomSheet({
 
       <View style={styles.scrollContent}>
         <View style={styles.actionRow}>
-          <PrimaryButton accessibilityLabel="Navigate to lot" label="Navigate" onPress={onNavigate} style={styles.actionPrimary} />
+          <PrimaryButton accessibilityLabel="Navigate to lot" label="Navigate" onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); onNavigate(); }} style={styles.actionPrimary} />
           {canReport ? (
-            <Pressable accessibilityLabel="Report lot status" onPress={onReport} style={styles.actionSecondary}>
+            <Pressable accessibilityLabel="Report lot status" onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); onReport(); }} style={styles.actionSecondary}>
               <Text style={styles.actionSecondaryText}>Report Status</Text>
             </Pressable>
           ) : null}

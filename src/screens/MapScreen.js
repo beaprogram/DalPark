@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Animated, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from 'react-native';
 import MapView, { Circle, Marker, Polygon, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import * as Haptics from 'expo-haptics';
 import * as Location from 'expo-location';
 import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -947,6 +948,7 @@ export default function MapScreen() {
   };
 
   const handleNavigate = async () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (!selectedLot) return;
     if (!userCoordinate) {
       Alert.alert('Location Required', 'Enable location access to show directions on the map.');
@@ -978,11 +980,13 @@ export default function MapScreen() {
   };
 
   const handleEndNavigation = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setNavFollowing(false);
     setNavigationMode(null);
   };
 
   const handleStartNavFollow = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setNavFollowing(true);
     if (userCoordinate) {
       mapRef.current?.animateToRegion({
@@ -1086,11 +1090,13 @@ export default function MapScreen() {
     if (latDiff < 0.00045 && lngDiff < 0.00045) {
       setNavigationMode(null);
       setNavFollowing(false);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Alert.alert('You have arrived!', `You've reached ${lotName}. Happy parking!`);
     }
   }, [userCoordinate, navigationMode?.lotId]);
 
   const handleReport = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (!selectedLot) return;
     if (!canReportSelectedLot) return;
     setReportModalVisible(true);
@@ -1109,6 +1115,7 @@ export default function MapScreen() {
   };
 
   const handleSelectLot = (lot) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     // Keep the current sheet height if user switches lots without closing it.
     if (selectedLot?.id && selectedLot.id !== lot.id) {
       sheetTranslateY.stopAnimation((value) => {
@@ -1387,6 +1394,7 @@ export default function MapScreen() {
             accessibilityRole="button"
             hitSlop={6}
             onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
               if (userCoordinate) {
                 mapRef.current?.animateToRegion({
                   latitude: userCoordinate.latitude,
@@ -1419,7 +1427,7 @@ export default function MapScreen() {
             accessibilityLabel="Toggle map theme"
             accessibilityRole="button"
             hitSlop={6}
-            onPress={() => setIsDarkMap(prev => !prev)}
+            onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setIsDarkMap(prev => !prev); }}
             style={({ pressed }) => [styles.searchTrailingButton, pressed && styles.iconButtonPressed]}
           >
             <Ionicons

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Alert, Image, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
 import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
@@ -135,6 +136,7 @@ export default function ReportModal({ visible, lot, onClose, onReported }) {
 
       const docRef = await addDoc(collection(db, 'reports'), entry);
 
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Alert.alert(
         photoUploadError ? 'Report submitted' : 'Thanks!',
         photoUploadError ? getPhotoUploadErrorMessage(photoUploadError) : 'Report submitted.'
@@ -176,7 +178,7 @@ export default function ReportModal({ visible, lot, onClose, onReported }) {
             {MOOD_FACES.map((face, i) => (
               <Pressable
                 key={i}
-                onPress={() => setPick(i + 1)}
+                onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setPick(i + 1); }}
                 style={[s.dot, pick === i + 1 && s.dotOn]}
               >
                 <Text style={s.faceTxt}>{face}</Text>

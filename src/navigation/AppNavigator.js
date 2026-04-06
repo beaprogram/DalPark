@@ -6,6 +6,7 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { Ionicons } from '@expo/vector-icons';
 import { auth } from '../config/firebase';
 import { DalTheme } from '../utils/theme';
+import SplashOverlay from '../components/common/SplashOverlay';
 
 import LoginScreen from '../screens/LoginScreen.js';
 import MapScreen from '../screens/MapScreen.js';
@@ -48,6 +49,7 @@ function MainTabs() {
 
 export default function AppNavigator() {
   const [activeUser, setActiveUser] = useState(null);
+  const [splashDone, setSplashDone] = useState(false);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -65,6 +67,7 @@ export default function AppNavigator() {
           <Stack.Screen name="Auth" component={LoginScreen} />
         )}
       </Stack.Navigator>
+      {!splashDone ? <SplashOverlay onFinish={() => setSplashDone(true)} /> : null}
     </NavigationContainer>
   );
 }

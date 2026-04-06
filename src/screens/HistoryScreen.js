@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Image, Modal, Pressable, RefreshControl, SectionList, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import * as Haptics from 'expo-haptics';
 import { onAuthStateChanged } from 'firebase/auth';
 import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
 import { auth, db } from '../config/firebase';
@@ -119,6 +120,7 @@ export default function HistoryScreen() {
   }, [items]);
 
   const handleVote = async (item, nextValue) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (!currentUser) {
       Alert.alert('Sign in required', 'Please sign in to vote on community reports.');
       return;

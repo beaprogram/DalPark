@@ -13,6 +13,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { onAuthStateChanged, sendPasswordResetEmail, updateProfile } from 'firebase/auth';
@@ -319,6 +320,7 @@ export default function SettingsScreen() {
       setProfileDraft(nextProfile);
       setAvatarLoadFailed(false);
       setEditModalVisible(false);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       showFeedback('screen', 'success', 'Profile updated successfully.');
     } catch (error) {
       showFeedback('edit', 'error', error?.message || 'Could not update your profile.');
@@ -402,6 +404,7 @@ export default function SettingsScreen() {
   };
 
   const openEditor = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setProfileDraft(profile);
     setEditorAvatarLoadFailed(false);
     setEditorPane('main');
@@ -551,7 +554,7 @@ export default function SettingsScreen() {
             danger
             icon="log-out-outline"
             label="Log out"
-            onPress={() => auth.signOut()}
+            onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); auth.signOut(); }}
             value="Sign out on this device"
           />
         </View>
