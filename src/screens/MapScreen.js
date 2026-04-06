@@ -346,7 +346,7 @@ export default function MapScreen() {
   const [navFollowing, setNavFollowing] = useState(false);
   const [isDarkMap, setIsDarkMap] = useState(false);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
-  const sheetMaxHeight = Math.min(windowHeight * 0.58, 480);
+  const sheetMaxHeight = Math.min(windowHeight * 0.62, 520);
   const sheetPeekHeight = Math.min(windowHeight * 0.5, 25);
   const sheetMaxOffset = Math.max(sheetMaxHeight - sheetPeekHeight, 0);
   const sheetHiddenOffset = sheetMaxHeight + 40;

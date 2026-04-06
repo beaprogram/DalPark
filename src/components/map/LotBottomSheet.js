@@ -156,6 +156,7 @@ export default function LotBottomSheet({
         </View>
       </View>
 
+      <ScrollView showsVerticalScrollIndicator={false} nestedScrollEnabled bounces={false} contentContainerStyle={{ flexGrow: 1 }}>
       <View
         onLayout={(event) => {
           const nextWidth = Math.round(event.nativeEvent.layout.width);
@@ -180,6 +181,7 @@ export default function LotBottomSheet({
           style={styles.pager}
         >
           <View style={[styles.page, styles.overviewPage, pageStyle]}>
+            <ScrollView showsVerticalScrollIndicator={false} nestedScrollEnabled bounces={false} contentContainerStyle={{ flexGrow: 1 }}>
             <View style={styles.primaryCard}>
               <View style={styles.primaryCardMain}>
                 <View style={styles.periodIconWrap}>
@@ -290,6 +292,7 @@ export default function LotBottomSheet({
                 </View>
               </View>
             ) : null}
+            </ScrollView>
           </View>
 
           <View style={[styles.page, pageStyle]}>
@@ -341,6 +344,7 @@ export default function LotBottomSheet({
           ) : null}
         </View>
       </View>
+      </ScrollView>
 
       {fullscreenPhoto ? (
         <Modal transparent visible={true} onRequestClose={() => setFullscreenPhoto(null)}>
@@ -377,7 +381,6 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   overviewPage: {
-    justifyContent: 'flex-end',
     paddingBottom: appTheme.spacing.xs,
   },
   dragArea: {
@@ -388,8 +391,8 @@ const styles = StyleSheet.create({
     width: 42,
     height: 4,
     borderRadius: appTheme.radius.sm,
-    backgroundColor: appTheme.color.textSecondary,
-    opacity: 0.45,
+    backgroundColor: appTheme.color.brandGold,
+    opacity: 0.7,
     marginBottom: appTheme.spacing.md,
   },
   headerRow: {
@@ -449,18 +452,18 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     gap: 6,
-    marginTop: 2,
-    marginBottom: 4,
+    marginTop: 8,
+    marginBottom: 16,
   },
   pageDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: 'rgba(255,255,255,0.18)',
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: 'rgba(255,255,255,0.5)',
   },
   pageDotActive: {
-    width: 18,
-    backgroundColor: 'rgba(242, 201, 76, 0.82)',
+    width: 22,
+    backgroundColor: '#F2C94C',
   },
   primaryCard: {
     flexDirection: 'row',

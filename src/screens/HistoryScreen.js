@@ -1,20 +1,35 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Image, Modal, Pressable, RefreshControl, ScrollView, SectionList, StyleSheet, Text, View } from 'react-native';
+import {
+  Alert,
+  Image,
+  Modal,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  SectionList,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import * as Haptics from 'expo-haptics';
 import { onAuthStateChanged } from 'firebase/auth';
 import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
 import { auth, db } from '../config/firebase';
 import { appTheme, componentMetrics } from '../theme/tokens';
 import { getReportTrustLabel, getReportVoteMeta, loadUserReportVotes, toggleReportVote } from '../utils/reportVotes';
 
+// ─── Constants ────────────────────────────────────────────────────────────────
 const BUSY_TAGS = ['Full', 'Busy', 'Moderate', 'Available', 'Empty'];
+const RATING_LABELS = ['Full', 'Busy', 'Moderate', 'Available', 'Empty'];
 const ONE_HR = 60 * 60 * 1000;
 const LIKE_VALUE = 1;
 const DISLIKE_VALUE = -1;
 const REPORTS_HISTORY_LIMIT = 200;
 const REPORT_CARD_MEDIA_HEIGHT = 86;
+const MEDAL_EMOJIS = ['🥇', '🥈', '🥉'];
+const MAX_LOT_FILTER_CHIPS = 4; // "All Lots" + 3 unique lot names shown
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 const toTimestampMs = (value) => {
   if (value == null) return 0;
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -37,9 +52,29 @@ const fmtDate = (ts) => {
 };
 
 const getReportCreatedAt = (report) => report?.createdAt ?? report?.clientCreatedAt ?? null;
-
 const getReportImageUri = (report) => report?.photoUrl || report?.imgUri || null;
 
+const getMonthLabel = () => {
+  const now = new Date();
+  return now.toLocaleString('default', { month: 'long', year: 'numeric' });
+};
+
+const isThisMonth = (report) => {
+  const ts = toTimestampMs(getReportCreatedAt(report));
+  if (!ts) return false;
+  const d = new Date(ts);
+  const now = new Date();
+  return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+};
+
+// Rating index (1-based) → status filter label
+const ratingMatchesFilter = (rating, statusFilter) => {
+  if (statusFilter === 'All') return true;
+  const label = RATING_LABELS[(rating || 1) - 1];
+  return label === statusFilter;
+};
+
+// ─── BusyDots ─────────────────────────────────────────────────────────────────
 const BusyDots = ({ lvl, compact = false }) => (
   <View style={[st.dotsRow, compact && st.dotsRowCompact]}>
     {[1, 2, 3, 4, 5].map((v) => (
@@ -49,6 +84,98 @@ const BusyDots = ({ lvl, compact = false }) => (
   </View>
 );
 
+// ─── Dropdown Picker ──────────────────────────────────────────────────────────
+const DropdownPicker = ({ label, options, selected, onSelect, accentColor, defaultValue }) => {
+  const [open, setOpen] = useState(false);
+  const isNonDefault = selected !== defaultValue;
+  return (
+    <>
+      <Pressable
+        onPress={() => setOpen(true)}
+        style={[
+          st.dropdownBtn,
+          isNonDefault && { borderColor: accentColor },
+        ]}
+      >
+        <Text
+          style={[
+            st.dropdownBtnTxt,
+            isNonDefault && { color: accentColor },
+          ]}
+          numberOfLines={1}
+        >
+          {isNonDefault ? selected : label}
+        </Text>
+        <Ionicons name="chevron-down" size={14} color={isNonDefault ? accentColor : appTheme.color.textSecondary} />
+      </Pressable>
+
+      <Modal visible={open} transparent animationType="slide" onRequestClose={() => setOpen(false)}>
+        <Pressable style={st.modalOverlay} onPress={() => setOpen(false)}>
+          <View style={st.modalSheet} onStartShouldSetResponder={() => true}>
+            <Text style={st.modalTitle}>{label}</Text>
+            {options.map((opt) => {
+              const active = opt === selected;
+              return (
+                <Pressable
+                  key={opt}
+                  onPress={() => { onSelect(opt); setOpen(false); }}
+                  style={st.modalOption}
+                >
+                  <Text style={[st.modalOptionTxt, active && { color: accentColor }]}>{opt}</Text>
+                  {active && <Ionicons name="checkmark" size={18} color={accentColor} />}
+                </Pressable>
+              );
+            })}
+          </View>
+        </Pressable>
+      </Modal>
+    </>
+  );
+};
+
+// ─── Tab Toggle ───────────────────────────────────────────────────────────────
+const TabToggle = ({ activeTab, onTabChange }) => (
+  <View style={st.toggleRow}>
+    <Pressable
+      style={[st.toggleBtn, activeTab === 'community' && st.toggleBtnActive]}
+      onPress={() => onTabChange('community')}
+    >
+      <Text style={[st.toggleTxt, activeTab === 'community' && st.toggleTxtActive]}>Community</Text>
+    </Pressable>
+    <Pressable
+      style={[st.toggleBtn, activeTab === 'leaderboard' && st.toggleBtnActive]}
+      onPress={() => onTabChange('leaderboard')}
+    >
+      <Text style={[st.toggleTxt, activeTab === 'leaderboard' && st.toggleTxtActive]}>Leaderboard</Text>
+    </Pressable>
+  </View>
+);
+
+// ─── Leaderboard Row ──────────────────────────────────────────────────────────
+const LeaderRow = ({ entry, rank, isMe }) => {
+  const medal = rank <= 3 ? MEDAL_EMOJIS[rank - 1] : null;
+  const rankLabel = medal || `#${rank}`;
+  return (
+    <View style={[st.leaderCard, isMe && st.leaderCardMe]}>
+      <Text style={st.leaderRank}>{rankLabel}</Text>
+      <View style={st.leaderInfo}>
+        <Text style={[st.leaderName, isMe && st.leaderNameMe]} numberOfLines={1}>
+          {entry.displayName || entry.userEmail || 'Anonymous'}
+          {isMe ? '  (you)' : ''}
+        </Text>
+        <Text style={st.leaderSub}>
+          {entry.monthCount} this month · {entry.totalCount} total
+        </Text>
+      </View>
+      <View style={[st.leaderBadge, isMe && st.leaderBadgeMe]}>
+        <Text style={[st.leaderBadgeNum, isMe && st.leaderBadgeNumMe]}>{entry.monthCount}</Text>
+        <Text style={[st.leaderBadgeLbl, isMe && st.leaderBadgeLblMe]}>reports</Text>
+      </View>
+    </View>
+  );
+};
+
+// ─── Main Screen ──────────────────────────────────────────────────────────────
 export default function HistoryScreen() {
   const [items, setItems] = useState([]);
   const [busy, setBusy] = useState(true);
@@ -57,16 +184,22 @@ export default function HistoryScreen() {
   const [userVotes, setUserVotes] = useState({});
   const [pendingVotes, setPendingVotes] = useState({});
   const [currentUser, setCurrentUser] = useState(auth.currentUser);
-  const [filterLot, setFilterLot] = useState(null);
-  const [filterRating, setFilterRating] = useState(null);
+  const [activeTab, setActiveTab] = useState('community');
+
+  // Filter state
+  const [lotFilter, setLotFilter] = useState('All Lots');
+  const [statusFilter, setStatusFilter] = useState('All');
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
+      setCurrentUser(nextUser);
+    });
+    return unsubscribe;
+  }, []);
 
   const pull = useCallback(async () => {
     try {
-      if (!currentUser?.uid) {
-        setUserVotes({});
-        return;
-      }
-
+      if (!currentUser?.uid) { setUserVotes({}); return; }
       const voteMap = await loadUserReportVotes(currentUser?.uid);
       setUserVotes(voteMap);
     } catch (_e) {
@@ -75,20 +208,11 @@ export default function HistoryScreen() {
   }, [currentUser?.uid]);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
-      setCurrentUser(nextUser);
-    });
-
-    return unsubscribe;
-  }, []);
-
-  useEffect(() => {
     const reportsQuery = query(
       collection(db, 'reports'),
       orderBy('clientCreatedAt', 'desc'),
       limit(REPORTS_HISTORY_LIMIT)
     );
-
     return onSnapshot(
       reportsQuery,
       (snapshot) => {
@@ -107,58 +231,68 @@ export default function HistoryScreen() {
     );
   }, []);
 
-  useEffect(() => {
-    pull();
-  }, [pull]);
+  useEffect(() => { pull(); }, [pull]);
 
-  const uniqueLots = useMemo(() => {
-    const lots = [...new Set(items.map((r) => r.lotName || r.lotId).filter(Boolean))];
-    return lots.sort();
+  // ── Lot filter options derived from data
+  const lotFilterOptions = useMemo(() => {
+    const names = [...new Set(items.map((r) => r.lotName || r.lotId).filter(Boolean))];
+    // show up to MAX_LOT_FILTER_CHIPS-1 lot names after "All Lots"
+    return ['All Lots', ...names.slice(0, MAX_LOT_FILTER_CHIPS - 1)];
   }, [items]);
 
-  const ratingOptions = [
-    { label: 'Full', value: 1 },
-    { label: 'Busy', value: 2 },
-    { label: 'Moderate', value: 3 },
-    { label: 'Available', value: 4 },
-    { label: 'Empty', value: 5 },
-  ];
+  const statusFilterOptions = ['All', 'Full', 'Busy', 'Moderate', 'Available', 'Empty'];
 
-  const filteredReports = useMemo(() => {
-    return items.filter((report) => {
-      if (filterLot && (report.lotName || report.lotId) !== filterLot) return false;
-      if (filterRating && report.rating !== filterRating) return false;
-      return true;
+  // ── Filtered items
+  const filteredItems = useMemo(() => {
+    return items.filter((r) => {
+      const lotMatch = lotFilter === 'All Lots' || (r.lotName || r.lotId) === lotFilter;
+      const statusMatch = ratingMatchesFilter(r.rating, statusFilter);
+      return lotMatch && statusMatch;
     });
-  }, [items, filterLot, filterRating]);
+  }, [items, lotFilter, statusFilter]);
 
+  // ── Community feed sections
   const sections = useMemo(() => {
     const cutoff = Date.now() - ONE_HR;
-    const recent = filteredReports.filter((r) => toTimestampMs(getReportCreatedAt(r)) > cutoff);
-    const past = filteredReports.filter((r) => toTimestampMs(getReportCreatedAt(r)) <= cutoff);
+    const recent = filteredItems.filter((r) => toTimestampMs(getReportCreatedAt(r)) > cutoff);
+    const past = filteredItems.filter((r) => toTimestampMs(getReportCreatedAt(r)) <= cutoff);
     const out = [];
     if (recent.length > 0) out.push({ title: 'Recent (Active)', data: recent });
     if (past.length > 0) out.push({ title: 'Past', data: past });
     return out;
-  }, [filteredReports]);
+  }, [filteredItems]);
 
+  // ── Leaderboard aggregation
+  const leaderboard = useMemo(() => {
+    const map = {};
+    items.forEach((report) => {
+      const uid = report.userId || report.userEmail || 'anon';
+      if (!map[uid]) {
+        map[uid] = {
+          uid,
+          displayName: report.displayName || null,
+          userEmail: report.userEmail || null,
+          totalCount: 0,
+          monthCount: 0,
+        };
+      }
+      map[uid].totalCount += 1;
+      if (isThisMonth(report)) map[uid].monthCount += 1;
+    });
+    return Object.values(map)
+      .sort((a, b) => b.monthCount - a.monthCount || b.totalCount - a.totalCount);
+  }, [items]);
+
+  // ── Vote handler
   const handleVote = async (item, nextValue) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (!currentUser) {
       Alert.alert('Sign in required', 'Please sign in to vote on community reports.');
       return;
     }
-
-    if (item.userId === currentUser.uid) {
-      return;
-    }
-
-    if (pendingVotes[item.id]) {
-      return;
-    }
+    if (item.userId === currentUser.uid) return;
+    if (pendingVotes[item.id]) return;
 
     setPendingVotes((prev) => ({ ...prev, [item.id]: true }));
-
     try {
       const result = await toggleReportVote({
         reportId: item.id,
@@ -166,11 +300,7 @@ export default function HistoryScreen() {
         nextValue,
         userId: currentUser.uid,
       });
-
-      setUserVotes((prev) => ({
-        ...prev,
-        [item.id]: result.currentVote,
-      }));
+      setUserVotes((prev) => ({ ...prev, [item.id]: result.currentVote }));
       setItems((prev) =>
         prev.map((entry) =>
           entry.id === item.id
@@ -200,12 +330,14 @@ export default function HistoryScreen() {
     }
   };
 
+  // ── Report card renderer
   const row = ({ item }) => {
     const voteMeta = getReportVoteMeta(item);
     const currentVote = userVotes[item.id] || 0;
     const trustLabel = getReportTrustLabel(item);
     const votingDisabled = !currentUser || item.userId === currentUser?.uid || pendingVotes[item.id];
     const imageUri = getReportImageUri(item);
+
     const voteControls = (
       <View style={[st.voteRow, !imageUri && st.voteRowCompact]}>
         <Pressable
@@ -225,12 +357,7 @@ export default function HistoryScreen() {
             name={currentVote === LIKE_VALUE ? 'thumbs-up' : 'thumbs-up-outline'}
             size={14}
           />
-          <Text
-            style={[
-              st.voteTxt,
-              currentVote === LIKE_VALUE && st.voteTxtActive,
-            ]}
-          >
+          <Text style={[st.voteTxt, currentVote === LIKE_VALUE && st.voteTxtActive]}>
             {voteMeta.upvoteCount}
           </Text>
         </Pressable>
@@ -252,12 +379,7 @@ export default function HistoryScreen() {
             name={currentVote === DISLIKE_VALUE ? 'thumbs-down' : 'thumbs-down-outline'}
             size={14}
           />
-          <Text
-            style={[
-              st.voteTxt,
-              currentVote === DISLIKE_VALUE && st.voteTxtDisliked,
-            ]}
-          >
+          <Text style={[st.voteTxt, currentVote === DISLIKE_VALUE && st.voteTxtDisliked]}>
             {voteMeta.downvoteCount}
           </Text>
         </Pressable>
@@ -301,72 +423,78 @@ export default function HistoryScreen() {
 
   return (
     <View style={st.wrap}>
-      <Text style={st.heading}>Community Reports</Text>
-      {items.length === 0 ? (
-        <View style={st.noData}>
-          <Text style={st.noDataTxt}>No reports yet.</Text>
-          <Text style={st.noDataSub}>
-            Go to the map, pick a lot, and tap "Report Status" to submit your first one.
-          </Text>
-        </View>
-      ) : (
+      {/* Tab toggle */}
+      <View style={st.headerArea}>
+        <TabToggle activeTab={activeTab} onTabChange={setActiveTab} />
+      </View>
+
+      {/* ── COMMUNITY TAB ── */}
+      {activeTab === 'community' && (
         <>
-        <View style={st.filterRow}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={st.filterScroll}>
-            <Pressable
-              onPress={() => setFilterLot(null)}
-              style={[st.filterChip, !filterLot && st.filterChipActive]}
-            >
-              <Text style={[st.filterChipText, !filterLot && st.filterChipTextActive]}>All Lots</Text>
-            </Pressable>
-            {uniqueLots.map((lot) => (
-              <Pressable
-                key={lot}
-                onPress={() => setFilterLot((prev) => prev === lot ? null : lot)}
-                style={[st.filterChip, filterLot === lot && st.filterChipActive]}
-              >
-                <Text style={[st.filterChipText, filterLot === lot && st.filterChipTextActive]}>{lot}</Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-        </View>
-
-        <View style={st.filterRow}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={st.filterScroll}>
-            <Pressable
-              onPress={() => setFilterRating(null)}
-              style={[st.filterChip, !filterRating && st.filterChipActive]}
-            >
-              <Text style={[st.filterChipText, !filterRating && st.filterChipTextActive]}>All</Text>
-            </Pressable>
-            {ratingOptions.map((opt) => (
-              <Pressable
-                key={opt.value}
-                onPress={() => setFilterRating((prev) => prev === opt.value ? null : opt.value)}
-                style={[st.filterChip, filterRating === opt.value && st.filterChipActive]}
-              >
-                <Text style={[st.filterChipText, filterRating === opt.value && st.filterChipTextActive]}>{opt.label}</Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-        </View>
-
-        {filteredReports.length === 0 && (filterLot || filterRating) ? (
-          <View style={{ alignItems: 'center', paddingVertical: 40 }}>
-            <Ionicons name="filter-outline" size={32} color={appTheme.color.textSecondary} />
-            <Text style={{ color: appTheme.color.textSecondary, marginTop: 8, fontSize: 14 }}>No reports match your filters</Text>
+          {/* Filter dropdowns */}
+          <View style={st.filterRow}>
+            <DropdownPicker
+              label="Filter by Lot"
+              options={lotFilterOptions}
+              selected={lotFilter}
+              onSelect={setLotFilter}
+              accentColor={appTheme.color.brandGold}
+              defaultValue="All Lots"
+            />
+            <DropdownPicker
+              label="Filter by Status"
+              options={statusFilterOptions}
+              selected={statusFilter}
+              onSelect={setStatusFilter}
+              accentColor={appTheme.color.brandBlue}
+              defaultValue="All"
+            />
           </View>
-        ) : (
-        <SectionList
-          sections={sections}
-          keyExtractor={(i) => i.id}
-          renderItem={row}
-          renderSectionHeader={({ section }) => (
-            <Text style={st.sectionHdr}>{section.title}</Text>
+
+          {filteredItems.length === 0 ? (
+            <View style={st.noData}>
+              <Text style={st.noDataTxt}>
+                {items.length === 0 ? 'No reports yet.' : 'No reports match your filters.'}
+              </Text>
+              {items.length === 0 ? (
+                <Text style={st.noDataSub}>
+                  Go to the map, pick a lot, and tap "Report Status" to submit your first one.
+                </Text>
+              ) : null}
+            </View>
+          ) : (
+            <SectionList
+              sections={sections}
+              keyExtractor={(i) => i.id}
+              renderItem={row}
+              renderSectionHeader={({ section }) => (
+                <Text style={st.sectionHdr}>{section.title}</Text>
+              )}
+              contentContainerStyle={st.feed}
+              showsVerticalScrollIndicator={false}
+              stickySectionHeadersEnabled={false}
+              refreshControl={
+                <RefreshControl
+                  refreshing={refreshing}
+                  onRefresh={async () => {
+                    setRefreshing(true);
+                    await pull();
+                    setRefreshing(false);
+                  }}
+                  tintColor={appTheme.color.brandGold}
+                  colors={[appTheme.color.brandGold]}
+                />
+              }
+            />
           )}
-          contentContainerStyle={st.feed}
+        </>
+      )}
+
+      {/* ── LEADERBOARD TAB ── */}
+      {activeTab === 'leaderboard' && (
+        <ScrollView
+          contentContainerStyle={st.leaderFeed}
           showsVerticalScrollIndicator={false}
-          stickySectionHeadersEnabled={false}
           refreshControl={
             <RefreshControl
               refreshing={refreshing}
@@ -379,11 +507,28 @@ export default function HistoryScreen() {
               colors={[appTheme.color.brandGold]}
             />
           }
-        />
-        )}
-        </>
+        >
+          <Text style={st.leaderMonthLabel}>{getMonthLabel()}</Text>
+
+          {leaderboard.length === 0 ? (
+            <View style={st.noData}>
+              <Text style={st.noDataTxt}>No reports this month yet.</Text>
+              <Text style={st.noDataSub}>Be the first to report a lot's status!</Text>
+            </View>
+          ) : (
+            leaderboard.map((entry, idx) => (
+              <LeaderRow
+                key={entry.uid}
+                entry={entry}
+                rank={idx + 1}
+                isMe={currentUser?.uid === entry.uid}
+              />
+            ))
+          )}
+        </ScrollView>
       )}
 
+      {/* Fullscreen image modal */}
       <Modal
         visible={!!bigImg}
         transparent
@@ -399,47 +544,103 @@ export default function HistoryScreen() {
 }
 
 const st = StyleSheet.create({
-  filterRow: {
-    marginBottom: 6,
-  },
-  filterScroll: {
-    paddingHorizontal: 16,
-    gap: 8,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  filterChip: {
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderRadius: 16,
-    backgroundColor: appTheme.color.bgSurface,
-    borderWidth: 1,
-    borderColor: appTheme.color.borderDefault,
-  },
-  filterChipActive: {
-    backgroundColor: appTheme.color.brandGold,
-    borderColor: appTheme.color.brandGold,
-  },
-  filterChipText: {
-    color: appTheme.color.textSecondary,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  filterChipTextActive: {
-    color: appTheme.color.bgCanvas,
-  },
   wrap: {
     flex: 1,
     backgroundColor: appTheme.color.bgCanvas,
     paddingTop: 60,
   },
-  heading: {
-    color: appTheme.color.textPrimary,
-    fontSize: appTheme.typography.size.xl,
-    fontWeight: '700',
+
+  // ── Header / toggle ──────────────────────────────────────────────────────────
+  headerArea: {
     paddingHorizontal: componentMetrics.horizontalPadding,
-    marginBottom: appTheme.spacing.md,
+    marginBottom: appTheme.spacing.sm,
   },
+  toggleRow: {
+    flexDirection: 'row',
+    gap: appTheme.spacing.sm,
+  },
+  toggleBtn: {
+    flex: 1,
+    height: 42,
+    borderRadius: appTheme.radius.lg,
+    borderWidth: 1,
+    borderColor: appTheme.color.borderDefault,
+    backgroundColor: appTheme.color.bgSurface,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  toggleBtnActive: {
+    borderColor: appTheme.color.brandGold,
+    backgroundColor: 'rgba(242,201,76,0.12)',
+  },
+  toggleTxt: {
+    color: appTheme.color.textSecondary,
+    fontSize: appTheme.typography.size.sm,
+    fontWeight: '700',
+  },
+  toggleTxtActive: {
+    color: appTheme.color.brandGold,
+  },
+
+  // ── Filter dropdowns ─────────────────────────────────────────────────────────
+  filterRow: {
+    flexDirection: 'row',
+    paddingHorizontal: componentMetrics.horizontalPadding,
+    gap: appTheme.spacing.sm,
+    marginBottom: appTheme.spacing.xs,
+  },
+  dropdownBtn: {
+    flex: 1,
+    height: 36,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    borderRadius: appTheme.radius.md,
+    borderWidth: 1,
+    borderColor: appTheme.color.borderDefault,
+    backgroundColor: appTheme.color.bgSurface,
+  },
+  dropdownBtnTxt: {
+    color: appTheme.color.textSecondary,
+    fontSize: appTheme.typography.size.xs,
+    fontWeight: '600',
+    flex: 1,
+    marginRight: 4,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalSheet: {
+    backgroundColor: appTheme.color.bgSurface,
+    borderTopLeftRadius: appTheme.radius.lg,
+    borderTopRightRadius: appTheme.radius.lg,
+    paddingTop: appTheme.spacing.md,
+    paddingBottom: 32,
+    paddingHorizontal: componentMetrics.horizontalPadding,
+  },
+  modalTitle: {
+    color: appTheme.color.textPrimary,
+    fontSize: appTheme.typography.size.md,
+    fontWeight: '700',
+    marginBottom: appTheme.spacing.sm,
+  },
+  modalOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: appTheme.color.borderDefault,
+  },
+  modalOptionTxt: {
+    color: appTheme.color.textPrimary,
+    fontSize: appTheme.typography.size.sm,
+  },
+
+  // ── Community feed ───────────────────────────────────────────────────────────
   feed: {
     paddingHorizontal: componentMetrics.horizontalPadding,
     paddingBottom: 20,
@@ -474,9 +675,7 @@ const st = StyleSheet.create({
     alignSelf: 'stretch',
     justifyContent: 'flex-start',
   },
-  cardMainNoPhoto: {
-    justifyContent: 'center',
-  },
+  cardMainNoPhoto: { justifyContent: 'center' },
   cardSide: {
     width: 138,
     alignItems: 'flex-end',
@@ -489,30 +688,31 @@ const st = StyleSheet.create({
     fontSize: appTheme.typography.size.md,
     fontWeight: '700',
   },
-  lotTxtNoPhoto: {
-    marginBottom: 6,
-    lineHeight: 22,
-  },
+  lotTxtNoPhoto: { marginBottom: 6, lineHeight: 22 },
   dateTxt: {
     color: appTheme.color.textSecondary,
     fontSize: appTheme.typography.size.xs,
     marginTop: 2,
     marginBottom: appTheme.spacing.xs,
   },
-  dateTxtNoPhoto: {
-    marginTop: 0,
-    marginBottom: 0,
-    lineHeight: 18,
+  dateTxtNoPhoto: { marginTop: 0, marginBottom: 0, lineHeight: 18 },
+
+  // ── Dots ─────────────────────────────────────────────────────────────────────
+  dotsRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  dotsRowCompact: { justifyContent: 'flex-end', flexWrap: 'wrap' },
+  dot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: appTheme.color.bgElevated,
+    borderWidth: 1,
+    borderColor: appTheme.color.borderDefault,
   },
-  dotsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  dotsRowCompact: {
-    justifyContent: 'flex-end',
-    flexWrap: 'wrap',
-  },
+  dotFill: { backgroundColor: appTheme.color.brandGold, borderColor: appTheme.color.brandGold },
+  dotLbl: { color: appTheme.color.textSecondary, fontSize: 11, marginLeft: 4 },
+  dotLblCompact: { marginLeft: 0 },
+
+  // ── Votes ────────────────────────────────────────────────────────────────────
   voteRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -520,11 +720,7 @@ const st = StyleSheet.create({
     gap: 8,
     marginTop: appTheme.spacing.sm,
   },
-  voteRowCompact: {
-    justifyContent: 'flex-end',
-    marginTop: 0,
-    gap: 6,
-  },
+  voteRowCompact: { justifyContent: 'flex-end', marginTop: 0, gap: 6 },
   voteBtn: {
     minWidth: 58,
     height: 30,
@@ -538,67 +734,25 @@ const st = StyleSheet.create({
     justifyContent: 'center',
     gap: 6,
   },
-  voteBtnCompact: {
-    minWidth: 54,
-    height: 28,
-    paddingHorizontal: 8,
-  },
-  voteBtnLiked: {
-    backgroundColor: 'rgba(34, 197, 94, 0.22)',
-    borderColor: 'rgba(34, 197, 94, 0.6)',
-  },
-  voteBtnDisliked: {
-    backgroundColor: 'rgba(239, 68, 68, 0.28)',
-    borderColor: 'rgba(239, 68, 68, 0.6)',
-  },
-  voteBtnDisabled: {
-    opacity: 0.65,
-  },
-  voteTxt: {
-    color: appTheme.color.textSecondary,
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  voteTxtActive: {
-    color: appTheme.color.textPrimary,
-  },
-  voteTxtDisliked: {
-    color: '#FFFFFF',
-  },
-  trustTag: {
-    color: appTheme.color.brandGold,
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  trustTagCompact: {
-    textAlign: 'right',
-  },
-  dot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: appTheme.color.bgElevated,
-    borderWidth: 1,
-    borderColor: appTheme.color.borderDefault,
-  },
-  dotFill: {
-    backgroundColor: appTheme.color.brandGold,
-    borderColor: appTheme.color.brandGold,
-  },
-  dotLbl: {
-    color: appTheme.color.textSecondary,
-    fontSize: 11,
-    marginLeft: 4,
-  },
-  dotLblCompact: {
-    marginLeft: 0,
-  },
+  voteBtnCompact: { minWidth: 54, height: 28, paddingHorizontal: 8 },
+  voteBtnLiked: { backgroundColor: 'rgba(34,197,94,0.22)', borderColor: 'rgba(34,197,94,0.6)' },
+  voteBtnDisliked: { backgroundColor: 'rgba(239,68,68,0.28)', borderColor: 'rgba(239,68,68,0.6)' },
+  voteBtnDisabled: { opacity: 0.65 },
+  voteTxt: { color: appTheme.color.textSecondary, fontSize: 12, fontWeight: '700' },
+  voteTxtActive: { color: appTheme.color.textPrimary },
+  voteTxtDisliked: { color: '#FFFFFF' },
+  trustTag: { color: appTheme.color.brandGold, fontSize: 11, fontWeight: '700' },
+  trustTagCompact: { textAlign: 'right' },
+
+  // ── Thumb ────────────────────────────────────────────────────────────────────
   thumb: {
     width: 158,
     height: REPORT_CARD_MEDIA_HEIGHT,
     borderRadius: appTheme.radius.sm,
     marginLeft: appTheme.spacing.sm,
   },
+
+  // ── Empty states ──────────────────────────────────────────────────────────────
   noData: {
     flex: 1,
     justifyContent: 'center',
@@ -616,14 +770,80 @@ const st = StyleSheet.create({
     textAlign: 'center',
     marginTop: appTheme.spacing.xs,
   },
+
+  // ── Image modal ───────────────────────────────────────────────────────────────
   imgOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.9)',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  bigImg: {
-    width: '90%',
-    height: '70%',
+  bigImg: { width: '90%', height: '70%' },
+
+  // ── Leaderboard ───────────────────────────────────────────────────────────────
+  leaderFeed: {
+    paddingHorizontal: componentMetrics.horizontalPadding,
+    paddingBottom: 32,
   },
+  leaderMonthLabel: {
+    color: appTheme.color.brandGold,
+    fontSize: appTheme.typography.size.sm,
+    fontWeight: '700',
+    marginBottom: appTheme.spacing.sm,
+  },
+  leaderCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: appTheme.color.bgSurface,
+    borderRadius: appTheme.radius.md,
+    borderWidth: 1,
+    borderColor: appTheme.color.borderDefault,
+    padding: appTheme.spacing.md,
+    marginBottom: appTheme.spacing.sm,
+    gap: appTheme.spacing.sm,
+  },
+  leaderCardMe: {
+    borderColor: appTheme.color.brandGold,
+    backgroundColor: 'rgba(242,201,76,0.08)',
+  },
+  leaderRank: {
+    width: 36,
+    fontSize: 22,
+    textAlign: 'center',
+    color: appTheme.color.textPrimary,
+  },
+  leaderInfo: { flex: 1, minWidth: 0 },
+  leaderName: {
+    color: appTheme.color.textPrimary,
+    fontSize: appTheme.typography.size.sm,
+    fontWeight: '700',
+  },
+  leaderNameMe: { color: appTheme.color.brandGold },
+  leaderSub: {
+    color: appTheme.color.textSecondary,
+    fontSize: appTheme.typography.size.xs,
+    marginTop: 2,
+  },
+  leaderBadge: {
+    minWidth: 56,
+    paddingHorizontal: appTheme.spacing.sm,
+    paddingVertical: 6,
+    borderRadius: appTheme.radius.md,
+    borderWidth: 1,
+    borderColor: appTheme.color.borderDefault,
+    backgroundColor: appTheme.color.bgElevated,
+    alignItems: 'center',
+  },
+  leaderBadgeMe: {
+    borderColor: appTheme.color.brandGold,
+    backgroundColor: 'rgba(242,201,76,0.14)',
+  },
+  leaderBadgeNum: {
+    color: appTheme.color.textPrimary,
+    fontSize: appTheme.typography.size.md,
+    fontWeight: '700',
+  },
+  leaderBadgeNumMe: { color: appTheme.color.brandGold },
+  leaderBadgeLbl: { color: appTheme.color.textSecondary, fontSize: 10, fontWeight: '700' },
+  leaderBadgeLblMe: { color: appTheme.color.brandGold },
 });
