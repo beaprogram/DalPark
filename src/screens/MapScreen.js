@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Animated, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from 'react-native';
-import MapView, { Circle, Marker, Polygon, Polyline } from 'react-native-maps';
+import MapView, { Circle, Marker, Polygon, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
@@ -343,6 +343,7 @@ export default function MapScreen() {
   const [navigationMode, setNavigationMode] = useState(null);
   const [isFetchingRoute, setIsFetchingRoute] = useState(false);
   const [navFollowing, setNavFollowing] = useState(false);
+  const [isDarkMap, setIsDarkMap] = useState(false);
   const sheetMaxHeight = Math.min(windowHeight * 0.58, 480);
   const sheetPeekHeight = Math.min(windowHeight * 0.5, 25);
   const sheetMaxOffset = Math.max(sheetMaxHeight - sheetPeekHeight, 0);
@@ -861,9 +862,6 @@ export default function MapScreen() {
   useEffect(() => {
     // Initial weather load.
     loadWeather();
-    fetchParkingZones()
-      .then(setParkingZones)
-      .catch(() => { });
   }, []);
 
   useEffect(() => {
@@ -1173,6 +1171,7 @@ export default function MapScreen() {
           setIsLotListVisible(false);
         }}
         ref={mapRef}
+        mapType={isDarkMap ? 'satellite' : 'standard'}
         showsCompass={false}
         showsMyLocationButton={false}
         showsPointsOfInterest={false}
@@ -1185,34 +1184,6 @@ export default function MapScreen() {
         }}
         style={styles.map}
       >
-        {!navigationMode ? parkingZones.map((zone) => (
-          <Polygon
-            coordinates={zone.polygon}
-            fillColor={zone.fillColor}
-            key={`zone-${zone.id}`}
-            strokeColor={zone.strokeColor}
-            strokeWidth={2}
-            tappable={false}
-            zIndex={1}
-          />
-        )) : null}
-
-        {!navigationMode && showZoneLabels
-          ? parkingZones.map((zone) => (
-            <Marker
-              anchor={{ x: 0.5, y: 0.5 }}
-              coordinate={zone.centroid}
-              key={`zone-label-${zone.id}`}
-              tracksViewChanges={false}
-              tappable={false}
-            >
-              <View pointerEvents="none" style={styles.campusLabel}>
-                <Text style={styles.campusLabelText}>{zone.name}</Text>
-              </View>
-            </Marker>
-          ))
-          : null}
-
         {selectedLot && !hideParkingMarkersWhenZoomedOut ? (
           <Circle
             center={selectedLot.coordinate}
@@ -1362,19 +1333,25 @@ export default function MapScreen() {
             </Pressable>
           ) : null}
           <Pressable
-            accessibilityLabel="Go to recommended parking lot"
+            accessibilityLabel="Go to my location"
             accessibilityRole="button"
-            disabled={Boolean(navigationMode)}
             hitSlop={6}
-            onPress={handleGoToRecommended}
-            style={({ pressed }) => [
-              styles.searchTrailingButton,
-              pressed && !navigationMode && styles.iconButtonPressed,
-              navigationMode && styles.searchTrailingButtonDisabled,
-            ]}
+            onPress={() => {
+              if (userCoordinate) {
+                mapRef.current?.animateToRegion({
+                  latitude: userCoordinate.latitude,
+                  longitude: userCoordinate.longitude,
+                  latitudeDelta: 0.001,
+                  longitudeDelta: 0.001,
+                }, 600);
+              } else {
+                Alert.alert('Location unavailable', 'Enable location access in your device settings.');
+              }
+            }}
+            style={({ pressed }) => [styles.searchTrailingButton, pressed && styles.iconButtonPressed]}
           >
             <Ionicons
-              color={navigationMode ? appTheme.color.textSecondary : appTheme.color.brandGold}
+              color={appTheme.color.brandGold}
               name="locate-outline"
               size={18}
             />
@@ -1387,6 +1364,19 @@ export default function MapScreen() {
             style={({ pressed }) => [styles.searchTrailingButton, pressed && styles.iconButtonPressed]}
           >
             <Ionicons color={appTheme.color.textPrimary} name="refresh-outline" size={18} />
+          </Pressable>
+          <Pressable
+            accessibilityLabel="Toggle map theme"
+            accessibilityRole="button"
+            hitSlop={6}
+            onPress={() => setIsDarkMap(prev => !prev)}
+            style={({ pressed }) => [styles.searchTrailingButton, pressed && styles.iconButtonPressed]}
+          >
+            <Ionicons
+              color={appTheme.color.brandGold}
+              name={isDarkMap ? "map-outline" : "globe-outline"}
+              size={18}
+            />
           </Pressable>
         </View>
 
