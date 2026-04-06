@@ -1,5 +1,6 @@
-const GOOGLE_MAPS_API_KEY = 'AIzaSyCB7KfUZhRpmCDVchecWo-znUhqCB6qjIk';
+import { KEYS } from '../config/keys';
 
+const GOOGLE_MAPS_API_KEY = KEYS.GOOGLE_MAPS_API_KEY;
 const GOOGLE_DIRECTIONS_URL = 'https://maps.googleapis.com/maps/api/directions/json';
 const FALLBACK_AVERAGE_SPEED_KMH = 30;
 
