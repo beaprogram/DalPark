@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
-import { View, TextInput, Text, StyleSheet, Alert, TouchableOpacity, Image } from 'react-native';
+import { View, TextInput, Text, StyleSheet, Alert, TouchableOpacity } from 'react-native';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
 import { auth } from '../config/firebase';
-import { DalTheme } from '../utils/theme';
+import { appTheme, componentMetrics } from '../theme/tokens';
 
 export default function LoginScreen() {
   const [email, setEmail] = useState('');
@@ -24,27 +24,27 @@ export default function LoginScreen() {
   return (
     <View style={styles.container}>
       <Text style={styles.headerText}>{hasAccount ? 'Login to HFXParkAid' : 'Sign Up'}</Text>
-      
+
       <TextInput
         style={styles.inputField}
         placeholder="Email"
-        placeholderTextColor={DalTheme.fadedGrey}
+        placeholderTextColor={appTheme.color.textSecondary}
         value={email}
         onChangeText={setEmail}
       />
       <TextInput
         style={styles.inputField}
         placeholder="Password"
-        placeholderTextColor={DalTheme.fadedGrey}
+        placeholderTextColor={appTheme.color.textSecondary}
         value={password}
         onChangeText={setPassword}
         secureTextEntry
       />
-      
+
       <TouchableOpacity style={styles.actionBtn} onPress={submitCredentials}>
         <Text style={styles.btnText}>{hasAccount ? 'Log In' : 'Sign Up'}</Text>
       </TouchableOpacity>
-      
+
       <TouchableOpacity onPress={() => setHasAccount(!hasAccount)} style={styles.switchModeBtn}>
         <Text style={styles.switchModeText}>
           {hasAccount ? 'Need an account? Sign Up' : 'Have an account? Log In'}
@@ -55,51 +55,46 @@ export default function LoginScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { 
-    flex: 1, 
-    justifyContent: 'center', 
-    padding: 20, 
-    backgroundColor: DalTheme.blackBg 
+  container: {
+    flex: 1,
+    justifyContent: 'center',
+    padding: componentMetrics.horizontalPadding,
+    backgroundColor: appTheme.color.bgCanvas,
   },
-  logo: {
-    width: '100%',
-    height: 80,
-    marginBottom: 20,
-    alignSelf: 'center'
+  headerText: {
+    fontSize: appTheme.typography.size.xxl,
+    fontWeight: 'bold',
+    marginBottom: appTheme.spacing.xl,
+    textAlign: 'center',
+    color: appTheme.color.brandGold,
   },
-  headerText: { 
-    fontSize: 28, 
-    fontWeight: 'bold', 
-    marginBottom: 30, 
-    textAlign: 'center', 
-    color: DalTheme.dalGold 
-  },
-  inputField: { 
-    borderWidth: 1, 
-    borderColor: DalTheme.dalGold, 
-    padding: 12, 
-    marginBottom: 15, 
-    borderRadius: 8, 
-    color: DalTheme.whiteText,
-    backgroundColor: DalTheme.inputBox
+  inputField: {
+    borderWidth: 1,
+    borderColor: appTheme.color.brandGold,
+    padding: appTheme.spacing.sm,
+    marginBottom: appTheme.spacing.md,
+    borderRadius: appTheme.radius.sm,
+    color: appTheme.color.textPrimary,
+    backgroundColor: appTheme.color.bgSurface,
+    fontSize: appTheme.typography.size.md,
   },
   actionBtn: {
-    backgroundColor: DalTheme.dalGold,
-    padding: 15,
-    borderRadius: 8,
+    backgroundColor: appTheme.color.brandGold,
+    padding: appTheme.spacing.md,
+    borderRadius: appTheme.radius.sm,
     alignItems: 'center',
-    marginBottom: 15
+    marginBottom: appTheme.spacing.md,
   },
-  btnText: { 
-    color: DalTheme.blackBg, 
-    fontWeight: 'bold', 
-    fontSize: 16 
+  btnText: {
+    color: appTheme.color.bgCanvas,
+    fontWeight: 'bold',
+    fontSize: appTheme.typography.size.md,
   },
-  switchModeBtn: { 
-    alignItems: 'center' 
+  switchModeBtn: {
+    alignItems: 'center',
   },
-  switchModeText: { 
-    color: DalTheme.whiteText, 
-    fontSize: 14 
-  }
+  switchModeText: {
+    color: appTheme.color.textPrimary,
+    fontSize: appTheme.typography.size.sm,
+  },
 });

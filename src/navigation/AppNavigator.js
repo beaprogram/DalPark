@@ -5,7 +5,7 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { onAuthStateChanged } from 'firebase/auth';
 import { Ionicons } from '@expo/vector-icons';
 import { auth } from '../config/firebase';
-import { DalTheme } from '../utils/theme';
+import { appTheme } from '../theme/tokens';
 import SplashOverlay from '../components/common/SplashOverlay';
 
 import LoginScreen from '../screens/LoginScreen.js';
@@ -22,11 +22,11 @@ function MainTabs() {
       screenOptions={({ route }) => ({
         headerShown: false,
         tabBarStyle: {
-          backgroundColor: DalTheme.inputBox,
+          backgroundColor: appTheme.color.bgSurface,
           borderTopWidth: 0,
         },
-        tabBarActiveTintColor: DalTheme.dalGold,
-        tabBarInactiveTintColor: DalTheme.fadedGrey,
+        tabBarActiveTintColor: appTheme.color.brandGold,
+        tabBarInactiveTintColor: appTheme.color.textSecondary,
         tabBarIcon: ({ selected, color, size }) => {
           let iconName;
           if (route.name === 'Map') {
