@@ -70,6 +70,7 @@ const buildStraightLineRoute = (origin, destination) => {
     durationSeconds,
     distanceMeters,
     isFallback: true,
+    steps: [{ id: 0, instruction: 'Head to destination', distance: '', duration: '', maneuver: 'straight' }],
   };
 };
 
@@ -94,6 +95,13 @@ export const fetchDrivingRoute = async ({ origin, destination }) => {
     const routes = payload.routes.map((route, index) => {
       const coordinates = decodePolyline(route?.overview_polyline?.points);
       const leg = route?.legs?.[0];
+      const steps = (leg?.steps || []).map((step, stepIndex) => ({
+        id: stepIndex,
+        instruction: (step.html_instructions || '').replace(/<[^>]*>/g, ''),
+        distance: step.distance?.text || '',
+        duration: step.duration?.text || '',
+        maneuver: step.maneuver || 'straight',
+      }));
       return {
         id: index,
         coordinates,
@@ -103,6 +111,7 @@ export const fetchDrivingRoute = async ({ origin, destination }) => {
         distanceText: leg?.distance?.text || '',
         summary: route?.summary || `Route ${index + 1}`,
         isFallback: false,
+        steps,
       };
     });
 

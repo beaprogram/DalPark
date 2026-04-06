@@ -344,6 +344,7 @@ export default function MapScreen() {
   const [isFetchingRoute, setIsFetchingRoute] = useState(false);
   const [navFollowing, setNavFollowing] = useState(false);
   const [isDarkMap, setIsDarkMap] = useState(false);
+  const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const sheetMaxHeight = Math.min(windowHeight * 0.58, 480);
   const sheetPeekHeight = Math.min(windowHeight * 0.5, 25);
   const sheetMaxOffset = Math.max(sheetMaxHeight - sheetPeekHeight, 0);
@@ -962,6 +963,7 @@ export default function MapScreen() {
         routes: result.routes,
         selectedIndex: result.selectedIndex,
       });
+      setCurrentStepIndex(0);
       setIsLotListVisible(false);
       handleCloseSheet();
     } catch (_error) {
@@ -1039,6 +1041,54 @@ export default function MapScreen() {
       longitudeDelta: 0.003,
     }, 800);
   }, [userCoordinate, navFollowing]);
+
+  useEffect(() => {
+    if (!navigationMode || !userCoordinate || !navFollowing) return;
+    const activeRoute = navigationMode.routes[navigationMode.selectedIndex];
+    if (!activeRoute?.steps?.length) return;
+
+    const steps = activeRoute.steps;
+    if (currentStepIndex >= steps.length - 1) return;
+
+    const totalCoords = activeRoute.coordinates.length;
+    const coordsPerStep = Math.max(1, Math.floor(totalCoords / steps.length));
+    const nextStepCoordIndex = Math.min((currentStepIndex + 1) * coordsPerStep, totalCoords - 1);
+    const nextStepCoord = activeRoute.coordinates[nextStepCoordIndex];
+
+    if (nextStepCoord) {
+      const latDiff = Math.abs(userCoordinate.latitude - nextStepCoord.latitude);
+      const lngDiff = Math.abs(userCoordinate.longitude - nextStepCoord.longitude);
+      if (latDiff < 0.0003 && lngDiff < 0.0003) {
+        setCurrentStepIndex((prev) => Math.min(prev + 1, steps.length - 1));
+      }
+    }
+  }, [userCoordinate, navigationMode?.lotId, navFollowing, currentStepIndex]);
+
+  const navStartTimeRef = useRef(null);
+
+  useEffect(() => {
+    if (navigationMode) {
+      navStartTimeRef.current = Date.now();
+    } else {
+      navStartTimeRef.current = null;
+    }
+  }, [navigationMode?.lotId]);
+
+  useEffect(() => {
+    if (!navigationMode || !userCoordinate || !navStartTimeRef.current) return;
+    if (Date.now() - navStartTimeRef.current < 10000) return;
+
+    const lotName = navigationMode.lotName;
+    const dest = navigationMode.destination;
+    const latDiff = Math.abs(userCoordinate.latitude - dest.latitude);
+    const lngDiff = Math.abs(userCoordinate.longitude - dest.longitude);
+
+    if (latDiff < 0.00045 && lngDiff < 0.00045) {
+      setNavigationMode(null);
+      setNavFollowing(false);
+      Alert.alert('You have arrived!', `You've reached ${lotName}. Happy parking!`);
+    }
+  }, [userCoordinate, navigationMode?.lotId]);
 
   const handleReport = () => {
     if (!selectedLot) return;
@@ -1485,6 +1535,35 @@ export default function MapScreen() {
         />
       </Animated.View>
 
+      {navigationMode && navFollowing && (() => {
+        const activeRoute = navigationMode.routes[navigationMode.selectedIndex];
+        const currentStep = activeRoute?.steps?.[currentStepIndex];
+        if (!currentStep) return null;
+
+        const getManeuverIcon = (maneuver) => {
+          if (maneuver?.includes('left')) return 'arrow-back';
+          if (maneuver?.includes('right')) return 'arrow-forward';
+          if (maneuver?.includes('uturn')) return 'return-down-back';
+          if (maneuver?.includes('roundabout')) return 'sync';
+          if (maneuver?.includes('merge')) return 'git-merge';
+          return 'arrow-up';
+        };
+
+        return (
+          <View style={[styles.navStepBar, { bottom: insets.bottom + appTheme.spacing.md + 80 }]}>
+            <View style={styles.navStepIconWrap}>
+              <Ionicons color={appTheme.color.brandGold} name={getManeuverIcon(currentStep.maneuver)} size={18} />
+            </View>
+            <View style={styles.navStepContent}>
+              <Text numberOfLines={2} style={styles.navStepInstruction}>{currentStep.instruction}</Text>
+              {currentStep.distance ? (
+                <Text style={styles.navStepDistance}>{currentStep.distance}</Text>
+              ) : null}
+            </View>
+          </View>
+        );
+      })()}
+
       {navigationMode ? (() => {
         const activeRoute = navigationMode.routes[navigationMode.selectedIndex];
         return (
@@ -1791,6 +1870,44 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     backgroundColor: 'rgba(0,0,0,0.2)',
     marginTop: 1,
+  },
+  navStepBar: {
+    position: 'absolute',
+    left: componentMetrics.horizontalPadding,
+    right: componentMetrics.horizontalPadding,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: appTheme.spacing.xs,
+    backgroundColor: 'rgba(11, 20, 36, 0.85)',
+    borderRadius: appTheme.radius.md,
+    borderWidth: 1,
+    borderColor: 'rgba(242, 201, 76, 0.3)',
+    paddingHorizontal: appTheme.spacing.sm,
+    paddingVertical: appTheme.spacing.xs,
+    zIndex: 31,
+    elevation: 6,
+  },
+  navStepIconWrap: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: 'rgba(242, 201, 76, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  navStepContent: {
+    flex: 1,
+    gap: 1,
+  },
+  navStepInstruction: {
+    color: appTheme.color.brandGold,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  navStepDistance: {
+    color: appTheme.color.textSecondary,
+    fontSize: 11,
+    fontWeight: '600',
   },
   navInfoBar: {
     position: 'absolute',
