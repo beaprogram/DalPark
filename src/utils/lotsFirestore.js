@@ -5,6 +5,7 @@ import { PARKING_LOTS } from '../data/parkingLots';
 
 const ALLOWED_STATUS = new Set(['EMPTY', 'NORMAL', 'CROWDED', 'FULL', 'UNKNOWN']);
 const ALLOWED_CONFIDENCE = new Set(['LOW', 'MEDIUM', 'HIGH']);
+const ALLOWED_LOT_TYPES = new Set(['COMMUTER_LOT', 'RESIDENCE_LOT', 'PARKADE_LOT', 'EVENT_LOT']);
 const DEFAULT_COORDINATE = { latitude: 44.6383, longitude: -63.5859 };
 
 const toNumber = (value, fallback = 0) => {
@@ -50,6 +51,42 @@ const toTimestampMs = (value) => {
   return undefined;
 };
 
+const inferLotType = (data, fallback) => {
+  const directType =
+    typeof data?.lotType === 'string'
+      ? data.lotType.trim().toUpperCase()
+      : typeof fallback?.lotType === 'string'
+        ? fallback.lotType.trim().toUpperCase()
+        : null;
+
+  if (directType && ALLOWED_LOT_TYPES.has(directType)) {
+    return directType;
+  }
+
+  const lotName = `${data?.name || fallback?.name || ''}`.toLowerCase();
+  if (
+    [
+      'glengarry',
+      'risley hall lot',
+      'risley hall parkade',
+      'shirreff hall',
+      'stairs',
+    ].includes(lotName)
+  ) {
+    return 'RESIDENCE_LOT';
+  }
+
+  if (lotName === 'dalplex') {
+    return 'EVENT_LOT';
+  }
+
+  if (lotName.includes('parkade')) {
+    return 'PARKADE_LOT';
+  }
+
+  return 'COMMUTER_LOT';
+};
+
 const normalizeLot = (id, data) => {
   const localFallback = PARKING_LOTS.find((lot) => lot.id === id) || PARKING_LOTS[0] || {};
   const coordinate = toCoordinate(data.coordinate, localFallback.coordinate || DEFAULT_COORDINATE);
@@ -60,6 +97,7 @@ const normalizeLot = (id, data) => {
       data.campus === 'sexton' || data.campus === 'studley'
         ? data.campus
         : localFallback.campus || 'studley',
+    lotType: inferLotType(data, localFallback),
     name: typeof data.name === 'string' ? data.name : localFallback.name,
     address: typeof data.address === 'string' ? data.address : localFallback.address,
     coordinate,

@@ -1,14 +1,22 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Animated, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import MapView, { Circle, Marker, Polygon } from 'react-native-maps';
+import { Alert, Animated, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from 'react-native';
+import MapView, { Circle, Marker, Polygon, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import * as Haptics from 'expo-haptics';
 import * as Location from 'expo-location';
+import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { STATUS_META } from '../constants/statusStyle';
+import { db } from '../config/firebase';
+import {
+  ACADEMIC_CALENDAR_SIGNALS,
+  CAMPUS_LOAD_BUCKETS,
+} from '../data/officialPredictionSignals';
 import { appTheme, componentMetrics } from '../theme/tokens';
 import LotBottomSheet from '../components/map/LotBottomSheet';
 import { subscribeLots } from '../utils/lotsFirestore';
 import { openNavigationToCoordinate } from '../utils/navigation';
+import { fetchDrivingRoute } from '../utils/routing';
 import {
   loadMapPreferences,
   saveLotListVisible,
@@ -17,7 +25,8 @@ import {
   saveSelectedLotId,
 } from '../utils/mapPreferencesStorage';
 import { fetchParkingZones } from '../utils/hrmApi';
-import { predictAvailability, blendWithCrowdsource, scoreToStatus } from '../utils/engine';
+import { predictAvailability, predictAvailabilityTimeline } from '../utils/engine';
+import { resolveAcademicDayType, resolvePredictionSignals } from '../utils/predictionSignals';
 import ReportModal from '../components/map/ReportModal';
 
 const INITIAL_REGION = {
@@ -31,6 +40,22 @@ const WEATHER_FALLBACK_COORDINATE = {
   latitude: 44.6488,
   longitude: -63.5752,
 };
+const REPORT_DISTANCE_LIMIT_METERS = 30;
+const RECENT_REPORT_WINDOW_MS = 120 * 60 * 1000;
+const REPORT_HISTORY_WINDOW_MS = 42 * 24 * 60 * 60 * 1000;
+const REPORT_FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
+const PREDICTION_TICK_MS = 60 * 1000;
+const REPORTS_SUBSCRIPTION_LIMIT = 1000;
+const RECOMMENDATION_DISTANCE_WEIGHT = 0.45;
+const RECOMMENDATION_AVAILABILITY_WEIGHT = 0.45;
+const RECOMMENDATION_CONVENIENCE_WEIGHT = 0.1;
+const LOT_LIST_BASE_MAX_HEIGHT = 420;
+const LOT_LIST_WITH_SHEET_MAX_HEIGHT = 184;
+const LOT_LIST_WITH_SHEET_SMALL_MAX_HEIGHT = 128;
+const SMALL_SCREEN_HEIGHT_THRESHOLD = 860;
+const SMALL_SCREEN_WIDTH_THRESHOLD = 400;
+const ISO_WITH_TIMEZONE_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+\-]\d{2}:\d{2})$/;
 
 // Map open-meteo weather code into short UI text + icon.
 const mapWeatherCode = (code) => {
@@ -75,15 +100,236 @@ const distanceMeters = (from, to) => {
   return 2 * earthRadiusMeters * Math.asin(Math.sqrt(a));
 };
 
+const STATUS_FALLBACK_SCORE = {
+  EMPTY: 86,
+  NORMAL: 64,
+  CROWDED: 42,
+  ALMOST_FULL: 22,
+  FULL: 8,
+  UNKNOWN: 50,
+};
+
+const clampToRange = (value, min, max) => Math.max(min, Math.min(max, value));
+
+const getLotRecommendationCapacity = (lot) => {
+  const daytimeCapacity =
+    Number(lot?.generalSpaces || 0) +
+    Number(lot?.shortTermSpaces || 0) +
+    Number(lot?.reservedSpaces || 0) * 0.35;
+  const eveningCapacity =
+    Number(lot?.eveningGeneralSpaces || 0) +
+    Number(lot?.eveningShortTermSpaces || 0);
+
+  return Math.max(0, daytimeCapacity, eveningCapacity);
+};
+
+const getDistanceScore = (distance) => {
+  if (!Number.isFinite(distance)) {
+    return 0;
+  }
+
+  if (distance <= 80) {
+    return 100;
+  }
+
+  if (distance <= 250) {
+    return Math.round(100 - ((distance - 80) / 170) * 28);
+  }
+
+  if (distance <= 650) {
+    return Math.round(72 - ((distance - 250) / 400) * 42);
+  }
+
+  if (distance <= 1200) {
+    return Math.round(30 - ((distance - 650) / 550) * 30);
+  }
+
+  return 0;
+};
+
+const getAvailabilityScore = (prediction, lot) => {
+  if (typeof prediction?.score === 'number' && Number.isFinite(prediction.score)) {
+    return clampToRange(Math.round(prediction.score), 0, 100);
+  }
+
+  return STATUS_FALLBACK_SCORE[lot?.lastStatus] ?? STATUS_FALLBACK_SCORE.UNKNOWN;
+};
+
+const getConvenienceScore = (lot) => {
+  const recommendationCapacity = getLotRecommendationCapacity(lot);
+  return clampToRange(Math.round((recommendationCapacity / 140) * 100), 18, 100);
+};
+
+const getRecommendationScore = ({ distance, availabilityScore, convenienceScore }) =>
+  Math.round(
+    getDistanceScore(distance) * RECOMMENDATION_DISTANCE_WEIGHT +
+      availabilityScore * RECOMMENDATION_AVAILABILITY_WEIGHT +
+      convenienceScore * RECOMMENDATION_CONVENIENCE_WEIGHT
+  );
+
+const toTimestampMs = (value) => {
+  if (value == null) {
+    return null;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (value instanceof Date) {
+    return value.getTime();
+  }
+
+  if (typeof value?.toMillis === 'function') {
+    return value.toMillis();
+  }
+
+  if (typeof value?.seconds === 'number') {
+    return value.seconds * 1000 + Math.floor((value.nanoseconds || 0) / 1e6);
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (/^\d{10,13}$/.test(trimmed)) {
+      const numericTimestamp = Number(trimmed);
+      return trimmed.length === 10 ? numericTimestamp * 1000 : numericTimestamp;
+    }
+
+    if (!ISO_WITH_TIMEZONE_RE.test(trimmed)) {
+      return null;
+    }
+
+    const parsed = Date.parse(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+};
+
+const getReportTimestampMs = (report) =>
+  toTimestampMs(report?.createdAt) ?? toTimestampMs(report?.clientCreatedAt);
+
+const reportFingerprint = (report) => {
+  const createdAt = getReportTimestampMs(report) ?? 'no-time';
+  return [
+    report?.lotId || 'no-lot',
+    report?.userId || 'no-user',
+    report?.rating || 'no-rating',
+    createdAt,
+    report?.photoUrl || report?.photoPath || report?.imgUri || '',
+  ].join('::');
+};
+
+const groupReportsByLot = (reports, nowMs) => {
+  const groupedReports = {};
+
+  reports.forEach((report) => {
+    const createdAt = getReportTimestampMs(report);
+    if (!createdAt) {
+      return;
+    }
+
+    const ageMs = nowMs - createdAt;
+    if (ageMs < -REPORT_FUTURE_TOLERANCE_MS || ageMs > REPORT_HISTORY_WINDOW_MS || !report?.lotId) {
+      return;
+    }
+
+    const normalizedReport = { ...report, createdAt };
+    if (!groupedReports[report.lotId]) {
+      groupedReports[report.lotId] = [];
+    }
+
+    groupedReports[report.lotId].push(normalizedReport);
+  });
+
+  Object.values(groupedReports).forEach((lotReports) => {
+    lotReports.sort((left, right) => (right.createdAt || 0) - (left.createdAt || 0));
+  });
+
+  return groupedReports;
+};
+
+const mergeReportsForPrediction = (remoteReports = [], localReport, nowMs) => {
+  const mergedReports = [...remoteReports];
+  if (localReport) {
+    mergedReports.unshift({
+      ...localReport,
+      createdAt: getReportTimestampMs(localReport) ?? localReport.createdAt,
+    });
+  }
+
+  const seenReports = new Set();
+  return mergedReports
+    .filter((report) => {
+      const createdAt = getReportTimestampMs(report);
+      if (!createdAt) {
+        return false;
+      }
+
+      const ageMs = nowMs - createdAt;
+      if (ageMs < -REPORT_FUTURE_TOLERANCE_MS || ageMs > REPORT_HISTORY_WINDOW_MS) {
+        return false;
+      }
+
+      const fingerprint = reportFingerprint({ ...report, createdAt });
+      if (seenReports.has(fingerprint)) {
+        return false;
+      }
+
+      seenReports.add(fingerprint);
+      return true;
+    })
+    .sort((left, right) => (getReportTimestampMs(right) || 0) - (getReportTimestampMs(left) || 0));
+};
+
+const getReportPhotoUri = (report) =>
+  report?.photoUrl || report?.imageUrl || report?.imgUri || null;
+
+const formatDriveDuration = (durationSeconds) => {
+  const totalMinutes = Math.max(0, Math.round((Number(durationSeconds) || 0) / 60));
+  if (totalMinutes < 60) {
+    return `${totalMinutes} min`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes === 0 ? `${hours} hr` : `${hours} hr ${minutes} min`;
+};
+
+const formatDriveDistance = (distanceMeters) => {
+  const meters = Math.max(0, Number(distanceMeters) || 0);
+  if (meters < 1000) {
+    return `${Math.round(meters)} m`;
+  }
+  return `${(meters / 1000).toFixed(1)} km`;
+};
+
+const enrichReportsForPrediction = (reports, lot, calendarSignals) =>
+  reports.map((report) => {
+    const reportTimestamp = getReportTimestampMs(report);
+    if (!reportTimestamp) {
+      return report;
+    }
+
+    return {
+      ...report,
+      createdAt: reportTimestamp,
+      derivedAcademicDayType: resolveAcademicDayType({
+        date: new Date(reportTimestamp),
+        lot,
+        calendarSignals,
+      }),
+    };
+  });
+
 export default function MapScreen() {
   const insets = useSafeAreaInsets();
+  const { height: windowHeight, width: windowWidth } = useWindowDimensions();
   const mapRef = useRef(null);
   const hasHydratedPreferences = useRef(false);
   const [lots, setLots] = useState([]);
   const [selectedLot, setSelectedLot] = useState(null);
   const [restoredSelectedLotId, setRestoredSelectedLotId] = useState(null);
   const [mapRegion, setMapRegion] = useState(INITIAL_REGION);
-  const sheetProgress = useRef(new Animated.Value(0)).current;
   const [searchQuery, setSearchQuery] = useState('');
   const [isLotListVisible, setIsLotListVisible] = useState(true);
   const [userCoordinate, setUserCoordinate] = useState(null);
@@ -91,12 +337,37 @@ export default function MapScreen() {
   const [weatherCode, setWeatherCode] = useState(null);
   const [reportModalVisible, setReportModalVisible] = useState(false);
   const [crowdsourceReports, setCrowdsourceReports] = useState({});
+  const [predictionNowMs, setPredictionNowMs] = useState(Date.now());
+  const [remoteReports, setRemoteReports] = useState([]);
+  const [calendarSignals, setCalendarSignals] = useState(ACADEMIC_CALENDAR_SIGNALS);
+  const [campusLoadBuckets, setCampusLoadBuckets] = useState(CAMPUS_LOAD_BUCKETS);
+  const [navigationMode, setNavigationMode] = useState(null);
+  const [isFetchingRoute, setIsFetchingRoute] = useState(false);
+  const [navFollowing, setNavFollowing] = useState(false);
+  const [isDarkMap, setIsDarkMap] = useState(false);
+  const [currentStepIndex, setCurrentStepIndex] = useState(0);
+  const sheetMaxHeight = Math.min(windowHeight * 0.62, 520);
+  const sheetPeekHeight = Math.min(windowHeight * 0.5, 25);
+  const sheetMaxOffset = Math.max(sheetMaxHeight - sheetPeekHeight, 0);
+  const sheetHiddenOffset = sheetMaxHeight + 40;
+  const lotListAnimation = useRef(new Animated.Value(1)).current;
+  const sheetTranslateY = useRef(new Animated.Value(sheetHiddenOffset)).current;
+  const sheetDragStartRef = useRef(sheetHiddenOffset);
+  const pendingSheetOffsetRef = useRef(null);
+  const predictionDisplayScoresRef = useRef({});
   const [weather, setWeather] = useState({
     label: 'Loading weather...',
     icon: 'cloudy-outline',
     temperature: '--',
   });
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+  const isSmallPhoneScreen =
+    windowWidth <= SMALL_SCREEN_WIDTH_THRESHOLD || windowHeight <= SMALL_SCREEN_HEIGHT_THRESHOLD;
+  const lotListMaxHeight = !selectedLot
+    ? LOT_LIST_BASE_MAX_HEIGHT
+    : isSmallPhoneScreen
+      ? LOT_LIST_WITH_SHEET_SMALL_MAX_HEIGHT
+      : LOT_LIST_WITH_SHEET_MAX_HEIGHT;
 
   useEffect(() => {
     // Lots now come from Firestore with local fallback in service.
@@ -111,6 +382,77 @@ export default function MapScreen() {
     });
 
     return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setPredictionNowMs(Date.now());
+    }, PREDICTION_TICK_MS);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    const reportsQuery = query(
+      collection(db, 'reports'),
+      orderBy('clientCreatedAt', 'desc'),
+      limit(REPORTS_SUBSCRIPTION_LIMIT)
+    );
+
+    return onSnapshot(
+      reportsQuery,
+      (snapshot) => {
+        const nextReports = snapshot.docs.map((docSnapshot) => ({
+          id: docSnapshot.id,
+          ...docSnapshot.data(),
+        }));
+        setRemoteReports(nextReports);
+      },
+      () => {
+        setRemoteReports([]);
+      }
+    );
+  }, []);
+
+  useEffect(() => {
+    const unsubscribeCalendar = onSnapshot(
+      collection(db, 'calendarSignals'),
+      (snapshot) => {
+        if (snapshot.empty) {
+          setCalendarSignals(ACADEMIC_CALENDAR_SIGNALS);
+          return;
+        }
+
+        setCalendarSignals(snapshot.docs.map((docSnapshot) => ({ id: docSnapshot.id, ...docSnapshot.data() })));
+      },
+      () => {
+        setCalendarSignals(ACADEMIC_CALENDAR_SIGNALS);
+      }
+    );
+
+    const unsubscribeCampusLoad = onSnapshot(
+      collection(db, 'campusLoadBuckets'),
+      (snapshot) => {
+        if (snapshot.empty) {
+          setCampusLoadBuckets(CAMPUS_LOAD_BUCKETS);
+          return;
+        }
+
+        setCampusLoadBuckets(
+          snapshot.docs.map((docSnapshot) => ({ id: docSnapshot.id, ...docSnapshot.data() }))
+        );
+      },
+      () => {
+        setCampusLoadBuckets(CAMPUS_LOAD_BUCKETS);
+      }
+    );
+
+    return () => {
+      unsubscribeCalendar();
+      unsubscribeCampusLoad();
+    };
   }, []);
 
   useEffect(() => {
@@ -162,12 +504,18 @@ export default function MapScreen() {
     setRestoredSelectedLotId(null);
   }, [lots, restoredSelectedLotId]);
 
+  const selectedLotDistanceMeters = useMemo(() => {
+    if (!selectedLot || !userCoordinate) {
+      return null;
+    }
+    return distanceMeters(userCoordinate, selectedLot.coordinate);
+  }, [selectedLot, userCoordinate]);
+
   const nearestLot = useMemo(() => {
     if (!userCoordinate || lots.length === 0) {
       return null;
     }
 
-    // Pick the closest lot from current user location.
     return lots.reduce((currentNearest, lot) => {
       if (!currentNearest) {
         return lot;
@@ -179,8 +527,159 @@ export default function MapScreen() {
     }, null);
   }, [userCoordinate, lots]);
 
+  const canReportSelectedLot =
+    selectedLotDistanceMeters !== null && selectedLotDistanceMeters <= REPORT_DISTANCE_LIMIT_METERS;
+
+  const reportDisabledMessage = useMemo(() => {
+    if (!selectedLot) {
+      return '';
+    }
+    if (!userCoordinate) {
+      return 'Enable location to report.';
+    }
+    if (selectedLotDistanceMeters === null) {
+      return '';
+    }
+    if (selectedLotDistanceMeters > REPORT_DISTANCE_LIMIT_METERS) {
+      return `Get closer to report (${Math.round(selectedLotDistanceMeters)}m away).`;
+    }
+    return '';
+  }, [selectedLot, userCoordinate, selectedLotDistanceMeters]);
+
+  const zoomDelta = Math.max(mapRegion.latitudeDelta, mapRegion.longitudeDelta);
+  // Keep map clean when zoomed out. Show labels only when zoomed out enough.
+  const hideParkingMarkersWhenZoomedOut = zoomDelta > 0.022;
+  const showZoneLabels = zoomDelta >= 0.028;
+
+  const firestoreReportsByLot = useMemo(
+    () => groupReportsByLot(remoteReports, predictionNowMs),
+    [remoteReports, predictionNowMs]
+  );
+
+  const lotPredictions = useMemo(() => {
+    const predictions = {};
+    const engineUpdatedAt = predictionNowMs;
+    const predictionDate = new Date(predictionNowMs);
+
+    lots.forEach((lot) => {
+      const mergedReports = mergeReportsForPrediction(
+        firestoreReportsByLot[lot.id] || [],
+        crowdsourceReports[lot.id],
+        predictionNowMs
+      );
+      const reportsForLot = enrichReportsForPrediction(mergedReports, lot, calendarSignals);
+      const signalContext = resolvePredictionSignals({
+        date: predictionDate,
+        lot,
+        calendarSignals,
+        campusLoadBuckets,
+      });
+      const previousDisplayScore = predictionDisplayScoresRef.current[lot.id] ?? null;
+      const prediction = predictAvailability({
+        lot,
+        weatherCode,
+        atDate: predictionDate,
+        reports: reportsForLot,
+        prevDisplayScore: previousDisplayScore,
+        ...signalContext,
+      });
+      const updatedBy =
+        prediction.reportCount > 0 && prediction.latestReportAt ? 'Crowd' : prediction.engineScore != null ? 'Engine' : null;
+      const updatedAt = updatedBy === 'Crowd' ? prediction.latestReportAt : updatedBy === 'Engine' ? engineUpdatedAt : null;
+
+      predictions[lot.id] = {
+        ...prediction,
+        score: prediction.displayScore,
+        status: prediction.status,
+        updatedAt,
+        updatedBy,
+        engineScore: prediction.engineScore,
+        crowdScore: prediction.crowdScore,
+        reportCount: prediction.reportCount,
+      };
+    });
+    return predictions;
+  }, [
+    lots,
+    weatherCode,
+    crowdsourceReports,
+    predictionNowMs,
+    firestoreReportsByLot,
+    calendarSignals,
+    campusLoadBuckets,
+  ]);
+
+  const recommendedLot = useMemo(() => {
+    if (!userCoordinate || lots.length === 0) {
+      return null;
+    }
+
+    return lots.reduce((currentBestLot, lot) => {
+      const walkingDistance = distanceMeters(userCoordinate, lot.coordinate);
+      const prediction = lotPredictions[lot.id];
+      const availabilityScore = getAvailabilityScore(prediction, lot);
+      const convenienceScore = getConvenienceScore(lot);
+      const recommendationScore = getRecommendationScore({
+        distance: walkingDistance,
+        availabilityScore,
+        convenienceScore,
+      });
+
+      const scoredLot = {
+        ...lot,
+        recommendationDistanceMeters: walkingDistance,
+        recommendationAvailabilityScore: availabilityScore,
+        recommendationScore,
+      };
+
+      if (!currentBestLot) {
+        return scoredLot;
+      }
+
+      if (scoredLot.recommendationScore !== currentBestLot.recommendationScore) {
+        return scoredLot.recommendationScore > currentBestLot.recommendationScore
+          ? scoredLot
+          : currentBestLot;
+      }
+
+      return scoredLot.recommendationDistanceMeters < currentBestLot.recommendationDistanceMeters
+        ? scoredLot
+        : currentBestLot;
+    }, null);
+  }, [userCoordinate, lots, lotPredictions]);
+
+  const mostOpenLot = useMemo(() => {
+    if (lots.length === 0) {
+      return null;
+    }
+
+    return lots.reduce((currentMostOpen, lot) => {
+      const prediction = lotPredictions[lot.id];
+      const availabilityScore = getAvailabilityScore(prediction, lot);
+      const walkingDistance = userCoordinate ? distanceMeters(userCoordinate, lot.coordinate) : Number.POSITIVE_INFINITY;
+      const scoredLot = {
+        ...lot,
+        recommendationAvailabilityScore: availabilityScore,
+        recommendationDistanceMeters: walkingDistance,
+      };
+
+      if (!currentMostOpen) {
+        return scoredLot;
+      }
+
+      if (scoredLot.recommendationAvailabilityScore !== currentMostOpen.recommendationAvailabilityScore) {
+        return scoredLot.recommendationAvailabilityScore > currentMostOpen.recommendationAvailabilityScore
+          ? scoredLot
+          : currentMostOpen;
+      }
+
+      return scoredLot.recommendationDistanceMeters < currentMostOpen.recommendationDistanceMeters
+        ? scoredLot
+        : currentMostOpen;
+    }, null);
+  }, [lots, lotPredictions, userCoordinate]);
+
   const searchableLots = useMemo(() => {
-    // Base list: alphabetical. If user typed text, apply filtering.
     const sortedLots = [...lots].sort((left, right) => left.name.localeCompare(right.name));
     const filteredLots = normalizedSearchQuery
       ? sortedLots.filter((lot) => {
@@ -189,40 +688,103 @@ export default function MapScreen() {
       })
       : sortedLots;
 
-    if (!nearestLot) {
+    if (!recommendedLot) {
       return filteredLots;
     }
 
-    const nearestIndex = filteredLots.findIndex((lot) => lot.id === nearestLot.id);
-    if (nearestIndex <= 0) {
-      return filteredLots;
-    }
-
-    // Move nearest to top so users can tap it fast.
     const nextLots = [...filteredLots];
-    const [nearestEntry] = nextLots.splice(nearestIndex, 1);
-    nextLots.unshift(nearestEntry);
-    return nextLots;
-  }, [lots, nearestLot, normalizedSearchQuery]);
-  const zoomDelta = Math.max(mapRegion.latitudeDelta, mapRegion.longitudeDelta);
-  // Keep map clean when zoomed out. Show labels only when zoomed out enough.
-  const hideParkingMarkersWhenZoomedOut = zoomDelta > 0.022;
-  const showZoneLabels = zoomDelta >= 0.028;
+    const priorityIds = [recommendedLot.id];
 
-  const lotPredictions = useMemo(() => {
-    const predictions = {};
-    lots.forEach((lot) => {
-      const base = predictAvailability({ lot, weatherCode });
-      const report = crowdsourceReports[lot.id];
-      if (report) {
-        const blended = blendWithCrowdsource(base.score, report);
-        predictions[lot.id] = { score: blended, status: scoreToStatus(blended) };
-      } else {
-        predictions[lot.id] = base;
+    if (nearestLot?.id && nearestLot.id !== recommendedLot.id) {
+      priorityIds.push(nearestLot.id);
+    }
+
+    if (
+      mostOpenLot?.id &&
+      mostOpenLot.id !== recommendedLot.id &&
+      mostOpenLot.id !== nearestLot?.id
+    ) {
+      priorityIds.push(mostOpenLot.id);
+    }
+
+    priorityIds
+      .reverse()
+      .forEach((lotId) => {
+        const lotIndex = nextLots.findIndex((lot) => lot.id === lotId);
+        if (lotIndex > 0) {
+          const [lotEntry] = nextLots.splice(lotIndex, 1);
+          nextLots.unshift(lotEntry);
+        }
+      });
+
+    return nextLots;
+  }, [lots, nearestLot, recommendedLot, mostOpenLot, normalizedSearchQuery]);
+
+  useEffect(() => {
+    const nextDisplayScores = {};
+    Object.entries(lotPredictions).forEach(([lotId, prediction]) => {
+      if (typeof prediction?.score === 'number') {
+        nextDisplayScores[lotId] = prediction.score;
       }
     });
-    return predictions;
-  }, [lots, weatherCode, crowdsourceReports]);
+    predictionDisplayScoresRef.current = nextDisplayScores;
+  }, [lotPredictions]);
+
+  const selectedLotMergedReports = useMemo(() => {
+    if (!selectedLot) {
+      return [];
+    }
+
+    return mergeReportsForPrediction(
+      firestoreReportsByLot[selectedLot.id] || [],
+      crowdsourceReports[selectedLot.id],
+      predictionNowMs
+    );
+  }, [selectedLot, firestoreReportsByLot, crowdsourceReports, predictionNowMs]);
+
+  const selectedLotReportsForPrediction = useMemo(() => {
+    if (!selectedLot) {
+      return [];
+    }
+
+    return enrichReportsForPrediction(selectedLotMergedReports, selectedLot, calendarSignals);
+  }, [selectedLot, selectedLotMergedReports, calendarSignals]);
+
+  const selectedLotTimelineScores = useMemo(() => {
+    if (!selectedLot) {
+      return [];
+    }
+
+    return predictAvailabilityTimeline({
+      lot: selectedLot,
+      weatherCode,
+      startDate: predictionNowMs,
+      reports: selectedLotReportsForPrediction,
+      signalResolver: (targetDate) =>
+        resolvePredictionSignals({
+          date: targetDate,
+          lot: selectedLot,
+          calendarSignals,
+          campusLoadBuckets,
+        }),
+    });
+  }, [
+    selectedLot,
+    weatherCode,
+    predictionNowMs,
+    calendarSignals,
+    campusLoadBuckets,
+    selectedLotReportsForPrediction,
+  ]);
+
+  const selectedLotLatestPhotoUri = useMemo(() => {
+    if (!selectedLot) {
+      return null;
+    }
+
+    const latestPhotoReport = selectedLotMergedReports.find((report) => Boolean(getReportPhotoUri(report)));
+    return latestPhotoReport ? getReportPhotoUri(latestPhotoReport) : null;
+  }, [selectedLot, selectedLotMergedReports]);
 
   const loadWeather = async () => {
     try {
@@ -271,21 +833,37 @@ export default function MapScreen() {
     }
   };
 
-  useEffect(() => {
-    // Bottom sheet slide animation.
-    Animated.timing(sheetProgress, {
-      toValue: selectedLot ? 1 : 0,
-      duration: 220,
+  const animateSheetTo = (nextOffset) => {
+    sheetDragStartRef.current = nextOffset;
+    Animated.spring(sheetTranslateY, {
+      toValue: nextOffset,
       useNativeDriver: true,
+      damping: 24,
+      stiffness: 260,
+      mass: 0.9,
     }).start();
-  }, [selectedLot, sheetProgress]);
+  };
+
+  useEffect(() => {
+    if (!selectedLot) {
+      sheetTranslateY.setValue(sheetHiddenOffset);
+      sheetDragStartRef.current = sheetHiddenOffset;
+      pendingSheetOffsetRef.current = null;
+      return;
+    }
+
+    const nextOffset =
+      pendingSheetOffsetRef.current === null
+        ? 0
+        : Math.max(0, Math.min(sheetMaxOffset, pendingSheetOffsetRef.current));
+
+    pendingSheetOffsetRef.current = null;
+    animateSheetTo(nextOffset);
+  }, [selectedLot, sheetMaxOffset, sheetHiddenOffset, sheetTranslateY]);
 
   useEffect(() => {
     // Initial weather load.
     loadWeather();
-    fetchParkingZones()
-      .then(setParkingZones)
-      .catch(() => { });
   }, []);
 
   useEffect(() => {
@@ -322,6 +900,14 @@ export default function MapScreen() {
   }, [isLotListVisible]);
 
   useEffect(() => {
+    Animated.timing(lotListAnimation, {
+      toValue: isLotListVisible ? 1 : 0,
+      duration: 180,
+      useNativeDriver: false,
+    }).start();
+  }, [isLotListVisible, lotListAnimation]);
+
+  useEffect(() => {
     if (!hasHydratedPreferences.current) {
       return;
     }
@@ -339,29 +925,180 @@ export default function MapScreen() {
     Alert.alert('Refreshed', 'Parking dataset was refreshed. Weather is currently unavailable.');
   };
 
-  const handleNavigate = async () => {
-    if (!selectedLot) {
-      return;
-    }
-
-    const target = selectedLot.navigationCoordinate || selectedLot.coordinate;
+  const openExternalNavigationFallback = async (lot, { notify = false } = {}) => {
+    const target = lot.navigationCoordinate || lot.coordinate;
     try {
       const opened = await openNavigationToCoordinate({
         latitude: target.latitude,
         longitude: target.longitude,
-        label: selectedLot.name,
+        label: lot.name,
       });
 
       if (!opened) {
         Alert.alert('Navigation Error', 'No map app could be opened on this device.');
+        return;
+      }
+
+      if (notify) {
+        Alert.alert('Showing directions in Google Maps instead', 'In-app routing was unavailable.');
       }
     } catch (_error) {
       Alert.alert('Navigation Error', 'Unable to open navigation right now.');
     }
   };
 
-  const handleReport = () => {
+  const handleNavigate = async () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (!selectedLot) return;
+    if (!userCoordinate) {
+      Alert.alert('Location Required', 'Enable location access to show directions on the map.');
+      return;
+    }
+    const target = selectedLot.navigationCoordinate || selectedLot.coordinate;
+    setIsFetchingRoute(true);
+    try {
+      const result = await fetchDrivingRoute({ origin: userCoordinate, destination: target });
+      setNavigationMode({
+        lotId: selectedLot.id,
+        lotName: selectedLot.name,
+        destination: target,
+        routes: result.routes,
+        selectedIndex: result.selectedIndex,
+      });
+      setCurrentStepIndex(0);
+      setIsLotListVisible(false);
+      handleCloseSheet();
+    } catch (_error) {
+      await openExternalNavigationFallback(selectedLot, { notify: true });
+    } finally {
+      setIsFetchingRoute(false);
+    }
+  };
+
+  const handleSelectRoute = (index) => {
+    setNavigationMode((prev) => (prev ? { ...prev, selectedIndex: index } : null));
+  };
+
+  const handleEndNavigation = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setNavFollowing(false);
+    setNavigationMode(null);
+  };
+
+  const handleStartNavFollow = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setNavFollowing(true);
+    if (userCoordinate) {
+      mapRef.current?.animateToRegion({
+        latitude: userCoordinate.latitude,
+        longitude: userCoordinate.longitude,
+        latitudeDelta: 0.003,
+        longitudeDelta: 0.003,
+      }, 800);
+    }
+  };
+
+  useEffect(() => {
+    if (!navigationMode || !userCoordinate) return;
+    const activeRoute = navigationMode.routes[navigationMode.selectedIndex];
+    const allPoints = activeRoute.coordinates.length > 2
+      ? activeRoute.coordinates
+      : [userCoordinate, navigationMode.destination];
+
+    setTimeout(() => {
+      mapRef.current?.fitToCoordinates(allPoints, {
+        edgePadding: { top: 180, right: 60, bottom: 200, left: 60 },
+        animated: true,
+      });
+    }, 300);
+  }, [navigationMode?.lotId]);
+
+  useEffect(() => {
+    if (!navigationMode) return;
+
+    let locationSub = null;
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') return;
+      locationSub = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.High, distanceInterval: 5, timeInterval: 3000 },
+        (location) => {
+          setUserCoordinate({
+            latitude: location.coords.latitude,
+            longitude: location.coords.longitude,
+          });
+        }
+      );
+    })();
+
+    return () => {
+      if (locationSub) locationSub.remove();
+    };
+  }, [navigationMode?.lotId]);
+
+  useEffect(() => {
+    if (!navigationMode || !userCoordinate || !navFollowing) return;
+    mapRef.current?.animateToRegion({
+      latitude: userCoordinate.latitude,
+      longitude: userCoordinate.longitude,
+      latitudeDelta: 0.003,
+      longitudeDelta: 0.003,
+    }, 800);
+  }, [userCoordinate, navFollowing]);
+
+  useEffect(() => {
+    if (!navigationMode || !userCoordinate || !navFollowing) return;
+    const activeRoute = navigationMode.routes[navigationMode.selectedIndex];
+    if (!activeRoute?.steps?.length) return;
+
+    const steps = activeRoute.steps;
+    if (currentStepIndex >= steps.length - 1) return;
+
+    const totalCoords = activeRoute.coordinates.length;
+    const coordsPerStep = Math.max(1, Math.floor(totalCoords / steps.length));
+    const nextStepCoordIndex = Math.min((currentStepIndex + 1) * coordsPerStep, totalCoords - 1);
+    const nextStepCoord = activeRoute.coordinates[nextStepCoordIndex];
+
+    if (nextStepCoord) {
+      const latDiff = Math.abs(userCoordinate.latitude - nextStepCoord.latitude);
+      const lngDiff = Math.abs(userCoordinate.longitude - nextStepCoord.longitude);
+      if (latDiff < 0.0003 && lngDiff < 0.0003) {
+        setCurrentStepIndex((prev) => Math.min(prev + 1, steps.length - 1));
+      }
+    }
+  }, [userCoordinate, navigationMode?.lotId, navFollowing, currentStepIndex]);
+
+  const navStartTimeRef = useRef(null);
+
+  useEffect(() => {
+    if (navigationMode) {
+      navStartTimeRef.current = Date.now();
+    } else {
+      navStartTimeRef.current = null;
+    }
+  }, [navigationMode?.lotId]);
+
+  useEffect(() => {
+    if (!navigationMode || !userCoordinate || !navStartTimeRef.current) return;
+    if (Date.now() - navStartTimeRef.current < 10000) return;
+
+    const lotName = navigationMode.lotName;
+    const dest = navigationMode.destination;
+    const latDiff = Math.abs(userCoordinate.latitude - dest.latitude);
+    const lngDiff = Math.abs(userCoordinate.longitude - dest.longitude);
+
+    if (latDiff < 0.00045 && lngDiff < 0.00045) {
+      setNavigationMode(null);
+      setNavFollowing(false);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      Alert.alert('You have arrived!', `You've reached ${lotName}. Happy parking!`);
+    }
+  }, [userCoordinate, navigationMode?.lotId]);
+
+  const handleReport = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (!selectedLot) return;
+    if (!canReportSelectedLot) return;
     setReportModalVisible(true);
   };
 
@@ -372,9 +1109,24 @@ export default function MapScreen() {
     }));
   };
 
+  const handleCloseSheet = () => {
+    pendingSheetOffsetRef.current = null;
+    setSelectedLot(null);
+  };
+
   const handleSelectLot = (lot) => {
-    // Select lot, close list, and zoom in.
-    setSelectedLot(lot);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    // Keep the current sheet height if user switches lots without closing it.
+    if (selectedLot?.id && selectedLot.id !== lot.id) {
+      sheetTranslateY.stopAnimation((value) => {
+        pendingSheetOffsetRef.current = Math.max(0, Math.min(sheetMaxOffset, value));
+        setSelectedLot(lot);
+      });
+    } else {
+      pendingSheetOffsetRef.current = null;
+      setSelectedLot(lot);
+    }
+
     setIsLotListVisible(false);
     mapRef.current?.animateToRegion(
       {
@@ -387,22 +1139,81 @@ export default function MapScreen() {
     );
   };
 
-  const handleGoToNearest = () => {
+  const handleGoToRecommended = () => {
     if (!userCoordinate) {
-      Alert.alert('Location Required', 'Enable location access to jump to the nearest parking lot.');
+      Alert.alert('Location Required', 'Enable location access to jump to a recommended parking lot.');
       return;
     }
 
-    if (!nearestLot) {
-      Alert.alert('No Lot Found', 'Unable to find nearby parking lots at the moment.');
+    if (!recommendedLot) {
+      Alert.alert('No Lot Found', 'Unable to find a recommended parking lot at the moment.');
       return;
     }
 
-    handleSelectLot(nearestLot);
+    handleSelectLot(recommendedLot);
   };
 
   const clearSearchQuery = () => {
     setSearchQuery('');
+  };
+
+  const sheetPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_event, gestureState) =>
+          Boolean(selectedLot) &&
+          Math.abs(gestureState.dy) > 6 &&
+          Math.abs(gestureState.dy) > Math.abs(gestureState.dx),
+        onPanResponderGrant: () => {
+          sheetTranslateY.stopAnimation((value) => {
+            sheetDragStartRef.current = value;
+          });
+        },
+        onPanResponderMove: (_event, gestureState) => {
+          const nextOffset = Math.max(
+            0,
+            Math.min(sheetMaxOffset, sheetDragStartRef.current + gestureState.dy)
+          );
+          sheetTranslateY.setValue(nextOffset);
+        },
+        onPanResponderRelease: (_event, gestureState) => {
+          const projectedOffset = Math.max(
+            0,
+            Math.min(sheetMaxOffset, sheetDragStartRef.current + gestureState.dy)
+          );
+          animateSheetTo(projectedOffset);
+        },
+        onPanResponderTerminate: (_event, gestureState) => {
+          const projectedOffset = Math.max(
+            0,
+            Math.min(sheetMaxOffset, sheetDragStartRef.current + gestureState.dy)
+          );
+          animateSheetTo(projectedOffset);
+        },
+      }),
+    [selectedLot, sheetMaxOffset]
+  );
+
+  const lotListAnimatedStyle = {
+    height: lotListAnimation.interpolate({
+      inputRange: [0, 1],
+      outputRange: [0, lotListMaxHeight],
+      extrapolate: 'clamp',
+    }),
+    opacity: lotListAnimation.interpolate({
+      inputRange: [0, 1],
+      outputRange: [0, 1],
+      extrapolate: 'clamp',
+    }),
+    transform: [
+      {
+        translateY: lotListAnimation.interpolate({
+          inputRange: [0, 1],
+          outputRange: [-8, 0],
+          extrapolate: 'clamp',
+        }),
+      },
+    ],
   };
 
   return (
@@ -411,45 +1222,26 @@ export default function MapScreen() {
         initialRegion={INITIAL_REGION}
         onRegionChange={setMapRegion}
         onRegionChangeComplete={setMapRegion}
+        onPanDrag={() => { if (navFollowing) setNavFollowing(false); }}
         onPress={() => {
-          setSelectedLot(null);
+          handleCloseSheet();
           setIsLotListVisible(false);
         }}
         ref={mapRef}
+        mapType={isDarkMap ? 'satellite' : 'standard'}
         showsCompass={false}
+        showsMyLocationButton={false}
         showsPointsOfInterest={false}
         showsUserLocation
+        mapPadding={{
+          top: insets.top + 116,
+          right: componentMetrics.horizontalPadding,
+          bottom: selectedLot ? sheetPeekHeight + 24 : 32,
+          left: componentMetrics.horizontalPadding,
+        }}
         style={styles.map}
       >
-        {parkingZones.map((zone) => (
-          <Polygon
-            coordinates={zone.polygon}
-            fillColor={zone.fillColor}
-            key={`zone-${zone.id}`}
-            strokeColor={zone.strokeColor}
-            strokeWidth={2}
-            tappable={false}
-            zIndex={1}
-          />
-        ))}
-
-        {showZoneLabels
-          ? parkingZones.map((zone) => (
-            <Marker
-              anchor={{ x: 0.5, y: 0.5 }}
-              coordinate={zone.centroid}
-              key={`zone-label-${zone.id}`}
-              tracksViewChanges={false}
-              tappable={false}
-            >
-              <View pointerEvents="none" style={styles.campusLabel}>
-                <Text style={styles.campusLabelText}>{zone.name}</Text>
-              </View>
-            </Marker>
-          ))
-          : null}
-
-        {selectedLot ? (
+        {selectedLot && !hideParkingMarkersWhenZoomedOut ? (
           <Circle
             center={selectedLot.coordinate}
             fillColor="rgba(242, 201, 76, 0.12)"
@@ -460,7 +1252,83 @@ export default function MapScreen() {
           />
         ) : null}
 
+        {navigationMode ? navigationMode.routes.map((route, index) => {
+          if (index === navigationMode.selectedIndex) return null;
+          return (
+            <Polyline
+              key={`alt-route-${index}`}
+              coordinates={route.coordinates}
+              strokeColor="rgba(150, 150, 150, 0.45)"
+              strokeWidth={4}
+              lineDashPattern={[10, 6]}
+              tappable
+              onPress={() => handleSelectRoute(index)}
+              zIndex={2}
+            />
+          );
+        }) : null}
+
+        {navigationMode && navigationMode.routes[navigationMode.selectedIndex] ? (
+          <Polyline
+            coordinates={navigationMode.routes[navigationMode.selectedIndex].coordinates}
+            strokeColor="#F2C94C"
+            strokeWidth={6}
+            zIndex={5}
+          />
+        ) : null}
+
+        {navigationMode && userCoordinate && navigationMode.routes[navigationMode.selectedIndex]?.coordinates?.length > 0 ? (() => {
+          const routeStart = navigationMode.routes[navigationMode.selectedIndex].coordinates[0];
+          return (
+            <Polyline
+              coordinates={[userCoordinate, routeStart]}
+              strokeColor="#9AA0A6"
+              strokeWidth={3}
+              lineDashPattern={[4, 8]}
+              zIndex={3}
+            />
+          );
+        })() : null}
+
+        {navigationMode && navigationMode.routes[navigationMode.selectedIndex]?.coordinates?.length > 1 ? (() => {
+          const coords = navigationMode.routes[navigationMode.selectedIndex].coordinates;
+          const routeEnd = coords[coords.length - 1];
+          const destLatDiff = Math.abs(routeEnd.latitude - navigationMode.destination.latitude);
+          const destLngDiff = Math.abs(routeEnd.longitude - navigationMode.destination.longitude);
+          if (destLatDiff + destLngDiff < 0.00005) return null;
+          return (
+            <Polyline
+              coordinates={[routeEnd, navigationMode.destination]}
+              strokeColor="#9AA0A6"
+              strokeWidth={3}
+              lineDashPattern={[4, 8]}
+              zIndex={3}
+            />
+          );
+        })() : null}
+
+        {navigationMode && userCoordinate ? (
+          <Marker anchor={{ x: 0.5, y: 0.5 }} coordinate={userCoordinate} identifier="nav-origin" tracksViewChanges={false} zIndex={9}>
+            <View style={styles.navOriginOuter}>
+              <View style={styles.navOriginInner} />
+            </View>
+          </Marker>
+        ) : null}
+
+        {navigationMode ? (
+          <Marker
+            coordinate={navigationMode.destination}
+            identifier={`destination-${navigationMode.lotId}`}
+            pinColor="#EA4335"
+            title={navigationMode.lotName}
+            zIndex={9}
+          />
+        ) : null}
+
+
+
         {lots.map((lot) => {
+          if (navigationMode) return null;
           const isSelected = selectedLot?.id === lot.id;
           if (hideParkingMarkersWhenZoomedOut) {
             return null;
@@ -497,7 +1365,7 @@ export default function MapScreen() {
         })}
       </MapView>
 
-      <View style={[styles.topOverlay, { paddingTop: insets.top + appTheme.spacing.xs }]}>
+      <View style={[styles.topOverlay, { paddingTop: insets.top + appTheme.spacing.md }]}>
         <View style={styles.searchBarCard}>
           <Ionicons color={appTheme.color.textSecondary} name="search-outline" size={18} />
           <TextInput
@@ -522,13 +1390,29 @@ export default function MapScreen() {
             </Pressable>
           ) : null}
           <Pressable
-            accessibilityLabel="Go to nearest parking lot"
+            accessibilityLabel="Go to my location"
             accessibilityRole="button"
             hitSlop={6}
-            onPress={handleGoToNearest}
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              if (userCoordinate) {
+                mapRef.current?.animateToRegion({
+                  latitude: userCoordinate.latitude,
+                  longitude: userCoordinate.longitude,
+                  latitudeDelta: 0.001,
+                  longitudeDelta: 0.001,
+                }, 600);
+              } else {
+                Alert.alert('Location unavailable', 'Enable location access in your device settings.');
+              }
+            }}
             style={({ pressed }) => [styles.searchTrailingButton, pressed && styles.iconButtonPressed]}
           >
-            <Ionicons color={appTheme.color.brandGold} name="locate-outline" size={18} />
+            <Ionicons
+              color={appTheme.color.brandGold}
+              name="locate-outline"
+              size={18}
+            />
           </Pressable>
           <Pressable
             accessibilityLabel="Refresh lot status"
@@ -538,6 +1422,19 @@ export default function MapScreen() {
             style={({ pressed }) => [styles.searchTrailingButton, pressed && styles.iconButtonPressed]}
           >
             <Ionicons color={appTheme.color.textPrimary} name="refresh-outline" size={18} />
+          </Pressable>
+          <Pressable
+            accessibilityLabel="Toggle map theme"
+            accessibilityRole="button"
+            hitSlop={6}
+            onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setIsDarkMap(prev => !prev); }}
+            style={({ pressed }) => [styles.searchTrailingButton, pressed && styles.iconButtonPressed]}
+          >
+            <Ionicons
+              color={appTheme.color.brandGold}
+              name={isDarkMap ? "map-outline" : "globe-outline"}
+              size={18}
+            />
           </Pressable>
         </View>
 
@@ -562,13 +1459,16 @@ export default function MapScreen() {
           </View>
         </View>
 
-        {isLotListVisible ? (
-          <View style={styles.lotListCard}>
+        <Animated.View
+          pointerEvents={isLotListVisible && !navigationMode ? 'auto' : 'none'}
+          style={[styles.lotListCardWrapper, lotListAnimatedStyle, navigationMode && styles.hiddenOverlay]}
+        >
+          <View style={[styles.lotListCard, { maxHeight: lotListMaxHeight }]}>
             <ScrollView
               keyboardShouldPersistTaps="handled"
               nestedScrollEnabled
               showsVerticalScrollIndicator={false}
-              style={styles.lotListScroll}
+              style={[styles.lotListScroll, { maxHeight: lotListMaxHeight }]}
             >
               {searchableLots.length === 0 ? (
                 <Text style={styles.emptyListText}>No parking lot matches your search.</Text>
@@ -583,11 +1483,23 @@ export default function MapScreen() {
                       <Text numberOfLines={1} style={styles.lotListName}>
                         {lot.name}
                       </Text>
-                      {nearestLot?.id === lot.id ? (
-                        <View style={styles.nearestTag}>
-                          <Text style={styles.nearestTagText}>Nearest</Text>
-                        </View>
-                      ) : null}
+                      <View style={styles.lotListTagRow}>
+                        {recommendedLot?.id === lot.id ? (
+                          <View style={[styles.nearestTag, styles.recommendedTag]}>
+                            <Text style={[styles.nearestTagText, styles.recommendedTagText]}>Recommended</Text>
+                          </View>
+                        ) : null}
+                        {nearestLot?.id === lot.id ? (
+                          <View style={styles.nearestTag}>
+                            <Text style={styles.nearestTagText}>Nearest</Text>
+                          </View>
+                        ) : null}
+                        {mostOpenLot?.id === lot.id ? (
+                          <View style={[styles.nearestTag, styles.mostOpenTag]}>
+                            <Text style={[styles.nearestTagText, styles.mostOpenTagText]}>Most Open</Text>
+                          </View>
+                        ) : null}
+                      </View>
                     </View>
                     <Text numberOfLines={1} style={styles.lotListMeta}>
                       {lot.campus === 'studley' ? 'Studley' : 'Sexton'} Campus | {lot.address}
@@ -597,33 +1509,103 @@ export default function MapScreen() {
               )}
             </ScrollView>
           </View>
-        ) : null}
+        </Animated.View>
       </View>
 
       <Animated.View
+        pointerEvents={selectedLot ? 'auto' : 'none'}
         style={[
           styles.sheetWrapper,
           {
+            height: sheetMaxHeight,
             transform: [
               {
-                translateY: sheetProgress.interpolate({
-                  inputRange: [0, 1],
-                  outputRange: [220, 0],
-                }),
+                translateY: sheetTranslateY,
               },
             ],
           },
         ]}
       >
         <LotBottomSheet
+          canReport={canReportSelectedLot}
+          currentTimeMs={predictionNowMs}
+          dragHandleProps={sheetPanResponder.panHandlers}
+          latestPhotoUri={selectedLotLatestPhotoUri}
           lot={selectedLot}
           predictedStatus={selectedLot ? lotPredictions[selectedLot.id] : null}
-          onClose={() => setSelectedLot(null)}
+          reportDisabledMessage={reportDisabledMessage}
+          scrollEnabled
+          timelineScores={selectedLotTimelineScores}
+          onClose={handleCloseSheet}
           onNavigate={handleNavigate}
           onReport={handleReport}
           visible={Boolean(selectedLot)}
         />
       </Animated.View>
+
+      {navigationMode && navFollowing && (() => {
+        const activeRoute = navigationMode.routes[navigationMode.selectedIndex];
+        const currentStep = activeRoute?.steps?.[currentStepIndex];
+        if (!currentStep) return null;
+
+        const getManeuverIcon = (maneuver) => {
+          if (maneuver?.includes('left')) return 'arrow-back';
+          if (maneuver?.includes('right')) return 'arrow-forward';
+          if (maneuver?.includes('uturn')) return 'return-down-back';
+          if (maneuver?.includes('roundabout')) return 'sync';
+          if (maneuver?.includes('merge')) return 'git-merge';
+          return 'arrow-up';
+        };
+
+        return (
+          <View style={[styles.navStepBar, { bottom: insets.bottom + appTheme.spacing.md + 80 }]}>
+            <View style={styles.navStepIconWrap}>
+              <Ionicons color={appTheme.color.brandGold} name={getManeuverIcon(currentStep.maneuver)} size={18} />
+            </View>
+            <View style={styles.navStepContent}>
+              <Text numberOfLines={2} style={styles.navStepInstruction}>{currentStep.instruction}</Text>
+              {currentStep.distance ? (
+                <Text style={styles.navStepDistance}>{currentStep.distance}</Text>
+              ) : null}
+            </View>
+          </View>
+        );
+      })()}
+
+      {navigationMode ? (() => {
+        const activeRoute = navigationMode.routes[navigationMode.selectedIndex];
+        return (
+          <View style={[styles.navInfoBar, { bottom: insets.bottom + appTheme.spacing.md }]}>
+            <View style={styles.navInfoMain}>
+              <Text numberOfLines={1} style={styles.navInfoLot}>{navigationMode.lotName}</Text>
+              <View style={styles.navInfoMetrics}>
+                <Ionicons color={appTheme.color.brandGold} name="time-outline" size={14} />
+                <Text style={styles.navInfoMetricText}>{formatDriveDuration(activeRoute.durationSeconds)}</Text>
+                <View style={styles.navInfoMetricDivider} />
+                <Ionicons color={appTheme.color.brandGold} name="navigate-outline" size={14} />
+                <Text style={styles.navInfoMetricText}>{formatDriveDistance(activeRoute.distanceMeters)}</Text>
+                {activeRoute.summary ? (
+                  <>
+                    <View style={styles.navInfoMetricDivider} />
+                    <Text style={styles.navInfoMetricText}>via {activeRoute.summary}</Text>
+                  </>
+                ) : null}
+              </View>
+            </View>
+            <Pressable
+              accessibilityLabel={navFollowing ? "Re-center map" : "Start navigation"}
+              accessibilityRole="button"
+              onPress={handleStartNavFollow}
+              style={({ pressed }) => [styles.navInfoStartBtn, pressed && styles.navInfoStartBtnPressed]}
+            >
+              <Ionicons color="#FFFFFF" name={navFollowing ? "locate" : "navigate"} size={18} />
+            </Pressable>
+            <Pressable accessibilityLabel="End navigation" accessibilityRole="button" onPress={handleEndNavigation} style={({ pressed }) => [styles.navInfoEndBtn, pressed && styles.navInfoEndBtnPressed]}>
+              <Text style={styles.navInfoEndText}>End</Text>
+            </Pressable>
+          </View>
+        );
+      })() : null}
 
       <ReportModal
         visible={reportModalVisible}
@@ -720,6 +1702,9 @@ const styles = StyleSheet.create({
     fontSize: appTheme.typography.size.xs,
     fontWeight: '700',
   },
+  lotListCardWrapper: {
+    overflow: 'hidden',
+  },
   lotListCard: {
     maxHeight: 280,
     backgroundColor: 'rgba(11,20,36,0.9)',
@@ -746,6 +1731,12 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: appTheme.spacing.sm,
   },
+  lotListTagRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: appTheme.spacing.xs,
+    flexShrink: 0,
+  },
   lotListName: {
     flex: 1,
     color: appTheme.color.textPrimary,
@@ -761,14 +1752,28 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 2,
     borderRadius: 999,
-    backgroundColor: 'rgba(242, 201, 76, 0.18)',
+    backgroundColor: 'rgba(242, 201, 76, 0.26)',
     borderWidth: 1,
-    borderColor: 'rgba(242, 201, 76, 0.5)',
+    borderColor: 'rgba(242, 201, 76, 0.65)',
+  },
+  recommendedTag: {
+    backgroundColor: 'rgba(39, 174, 96, 0.28)',
+    borderColor: 'rgba(39, 174, 96, 0.55)',
+  },
+  mostOpenTag: {
+    backgroundColor: 'rgba(47, 128, 237, 0.26)',
+    borderColor: 'rgba(47, 128, 237, 0.58)',
   },
   nearestTagText: {
-    color: appTheme.color.brandGold,
+    color: '#F8FAFC',
     fontSize: 11,
     fontWeight: '700',
+  },
+  recommendedTagText: {
+    color: '#F8FAFC',
+  },
+  mostOpenTagText: {
+    color: '#F8FAFC',
   },
   emptyListText: {
     paddingHorizontal: appTheme.spacing.md,
@@ -810,6 +1815,182 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
     paddingHorizontal: 0,
     paddingVertical: 0,
+  },
+  searchTrailingButtonDisabled: {
+    opacity: 0.45,
+  },
+  hiddenOverlay: {
+    opacity: 0,
+  },
+  navOriginOuter: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 3,
+    borderColor: '#4285F4',
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3,
+  },
+  navOriginInner: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#4285F4',
+  },
+  navDestWrap: {
+    alignItems: 'center',
+  },
+  navDestPin: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#EA4335',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.35,
+    shadowRadius: 4,
+  },
+  navDestPinDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#FFFFFF',
+  },
+  navDestStem: {
+    width: 4,
+    height: 8,
+    backgroundColor: '#EA4335',
+  },
+  navDestShadow: {
+    width: 12,
+    height: 4,
+    borderRadius: 6,
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    marginTop: 1,
+  },
+  navStepBar: {
+    position: 'absolute',
+    left: componentMetrics.horizontalPadding,
+    right: componentMetrics.horizontalPadding,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: appTheme.spacing.xs,
+    backgroundColor: 'rgba(11, 20, 36, 0.85)',
+    borderRadius: appTheme.radius.md,
+    borderWidth: 1,
+    borderColor: 'rgba(242, 201, 76, 0.3)',
+    paddingHorizontal: appTheme.spacing.sm,
+    paddingVertical: appTheme.spacing.xs,
+    zIndex: 31,
+    elevation: 6,
+  },
+  navStepIconWrap: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: 'rgba(242, 201, 76, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  navStepContent: {
+    flex: 1,
+    gap: 1,
+  },
+  navStepInstruction: {
+    color: appTheme.color.brandGold,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  navStepDistance: {
+    color: appTheme.color.textSecondary,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  navInfoBar: {
+    position: 'absolute',
+    left: componentMetrics.horizontalPadding,
+    right: componentMetrics.horizontalPadding,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: appTheme.spacing.sm,
+    backgroundColor: appTheme.color.bgElevated,
+    borderRadius: appTheme.radius.lg,
+    borderWidth: 1,
+    borderColor: appTheme.color.borderDefault,
+    paddingHorizontal: appTheme.spacing.md,
+    paddingVertical: appTheme.spacing.sm,
+    zIndex: 30,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.28,
+    shadowRadius: 6,
+    elevation: 6,
+  },
+  navInfoMain: {
+    flex: 1,
+    gap: 4,
+  },
+  navInfoLot: {
+    color: appTheme.color.textPrimary,
+    fontSize: appTheme.typography.size.md,
+    fontWeight: '700',
+  },
+  navInfoMetrics: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 4,
+  },
+  navInfoMetricText: {
+    color: appTheme.color.textSecondary,
+    fontSize: appTheme.typography.size.xs,
+    fontWeight: '600',
+  },
+  navInfoMetricDivider: {
+    width: 1,
+    height: 12,
+    backgroundColor: appTheme.color.borderDefault,
+    marginHorizontal: 4,
+  },
+  navInfoStartBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#1A73E8',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  navInfoStartBtnPressed: {
+    opacity: 0.85,
+  },
+  navInfoEndBtn: {
+    minHeight: componentMetrics.touchTargetMin,
+    paddingHorizontal: appTheme.spacing.md,
+    borderRadius: appTheme.radius.md,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 107, 0.45)',
+    backgroundColor: 'rgba(255, 107, 107, 0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  navInfoEndBtnPressed: {
+    opacity: 0.85,
+  },
+  navInfoEndText: {
+    color: '#FF9F6B',
+    fontSize: appTheme.typography.size.sm,
+    fontWeight: '700',
   },
   campusLabelText: {
     color: '#FFFFFF',

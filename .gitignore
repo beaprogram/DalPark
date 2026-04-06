@@ -31,7 +31,12 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
 .env*.local
+*.log
+
+# API keys config (use keys.example.js as template)
+src/config/keys.js
 
 # typescript
 *.tsbuildinfo

@@ -12,7 +12,8 @@ export const appTheme = {
       EMPTY: '#22C55E',
       NORMAL: '#84CC16',
       CROWDED: '#F59E0B',
-      FULL: '#EF4444',
+      ALMOST_FULL: '#EF4444',
+      FULL: '#ff0000',
       UNKNOWN: '#94A3B8',
     },
     zone: {
