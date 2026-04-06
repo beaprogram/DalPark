@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Image, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
+import { collection, onSnapshot, orderBy, query, where } from 'firebase/firestore';
 import { STATUS_META } from '../../constants/statusStyle';
 import { appTheme, componentMetrics } from '../../theme/tokens';
+import { db } from '../../config/firebase';
 import { isEveningTime, scoreToStatus } from '../../utils/engine';
 import PrimaryButton from '../common/PrimaryButton';
 
@@ -68,6 +70,9 @@ export default function LotBottomSheet({
   const [activePage, setActivePage] = useState(0);
   const [pagerWidth, setPagerWidth] = useState(0);
   const [scoreTrackWidth, setScoreTrackWidth] = useState(0);
+  const [galleryPhotos, setGalleryPhotos] = useState([]);
+  const [galleryLoading, setGalleryLoading] = useState(false);
+  const [fullscreenPhoto, setFullscreenPhoto] = useState(null);
   const pagerRef = useRef(null);
 
   useEffect(() => {
@@ -75,6 +80,29 @@ export default function LotBottomSheet({
     requestAnimationFrame(() => {
       pagerRef.current?.scrollTo({ x: 0, animated: false });
     });
+  }, [lot?.id]);
+
+  useEffect(() => {
+    if (!lot?.id) {
+      setGalleryPhotos([]);
+      return;
+    }
+    setGalleryLoading(true);
+    const q = query(
+      collection(db, 'reports'),
+      where('lotId', '==', lot.id),
+      orderBy('clientCreatedAt', 'desc')
+    );
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const photos = snapshot.docs
+        .map((doc) => ({ id: doc.id, ...doc.data() }))
+        .filter((report) => report.photoUrl);
+      setGalleryPhotos(photos);
+      setGalleryLoading(false);
+    }, () => {
+      setGalleryLoading(false);
+    });
+    return unsubscribe;
   }, [lot?.id]);
 
   if (!visible || !lot) {
@@ -172,6 +200,44 @@ export default function LotBottomSheet({
               ) : null}
             </View>
 
+            <View style={styles.scoreSection}>
+              <View
+                onLayout={(event) => {
+                  const nextWidth = Math.round(event.nativeEvent.layout.width);
+                  if (nextWidth > 0 && nextWidth !== scoreTrackWidth) {
+                    setScoreTrackWidth(nextWidth);
+                  }
+                }}
+                style={styles.scoreTrack}
+              >
+                {scoreTrackWidth > 0 ? (
+                  <Svg height={14} style={styles.scoreSvg} width={scoreTrackWidth}>
+                    <Defs>
+                      <LinearGradient id={gradientId} x1="0%" x2="100%" y1="0%" y2="0%">
+                        <Stop offset="0%" stopColor={appTheme.color.status.FULL} />
+                        <Stop offset="50%" stopColor={appTheme.color.status.CROWDED} />
+                        <Stop offset="100%" stopColor={appTheme.color.status.EMPTY} />
+                      </LinearGradient>
+                    </Defs>
+                    <Rect fill={`url(#${gradientId})`} height="10" rx="5" ry="5" width={scoreTrackWidth} x="0" y="2" />
+                  </Svg>
+                ) : null}
+                <View
+                  style={[
+                    styles.scorePointer,
+                    {
+                      left: `${clampedScore}%`,
+                      backgroundColor: scoreColor(clampedScore),
+                    },
+                  ]}
+                />
+              </View>
+              <View style={styles.scoreCaptionRow}>
+                <Text style={styles.scoreCaption}>Full</Text>
+                <Text style={styles.scoreCaption}>Empty</Text>
+              </View>
+            </View>
+
             {timelineScores.length > 0 ? (
               <View style={styles.timelineSection}>
                 <Text style={styles.timelineTitle}>Today</Text>
@@ -226,67 +292,35 @@ export default function LotBottomSheet({
           </View>
 
           <View style={[styles.page, pageStyle]}>
-            <View style={styles.detailsPanel}>
-              <View style={styles.scoreSection}>
-                <View style={styles.scoreHeadingRow}>
-                  <Text style={styles.scoreHeading}>Prediction score</Text>
-                  <Text style={styles.scoreValue}>{clampedScore}/100</Text>
-                </View>
-                <View
-                  onLayout={(event) => {
-                    const nextWidth = Math.round(event.nativeEvent.layout.width);
-                    if (nextWidth > 0 && nextWidth !== scoreTrackWidth) {
-                      setScoreTrackWidth(nextWidth);
-                    }
-                  }}
-                  style={styles.scoreTrack}
-                >
-                  {scoreTrackWidth > 0 ? (
-                    <Svg height={14} style={styles.scoreSvg} width={scoreTrackWidth}>
-                    <Defs>
-                        <LinearGradient id={gradientId} x1="0%" x2="100%" y1="0%" y2="0%">
-                        <Stop offset="0%" stopColor={appTheme.color.status.FULL} />
-                        <Stop offset="50%" stopColor={appTheme.color.status.CROWDED} />
-                        <Stop offset="100%" stopColor={appTheme.color.status.EMPTY} />
-                        </LinearGradient>
-                    </Defs>
-                      <Rect fill={`url(#${gradientId})`} height="10" rx="5" ry="5" width={scoreTrackWidth} x="0" y="2" />
-                    </Svg>
-                  ) : null}
-                  <View
-                    style={[
-                      styles.scorePointer,
-                      {
-                        left: `${clampedScore}%`,
-                        backgroundColor: scoreColor(clampedScore),
-                      },
-                    ]}
-                  />
-                </View>
-                <View style={styles.scoreCaptionRow}>
-                  <Text style={styles.scoreCaption}>Packed</Text>
-                  <Text style={styles.scoreCaption}>More Available</Text>
-                </View>
+            {galleryLoading ? (
+              <View style={styles.galleryEmpty}>
+                <ActivityIndicator color={appTheme.color.brandGold} size="small" />
               </View>
-
-              <View style={styles.detailsGrid}>
-                <View style={styles.detailsItem}>
-                  <Text style={styles.detailsItemLabel}>Day</Text>
-                  <Text style={styles.detailsItemValue}>{dayTotal}</Text>
-                </View>
-                <View style={styles.detailsItem}>
-                  <Text style={styles.detailsItemLabel}>Evening</Text>
-                  <Text style={styles.detailsItemValue}>{eveningTotal}</Text>
-                </View>
+            ) : galleryPhotos.length === 0 ? (
+              <View style={styles.galleryEmpty}>
+                <Ionicons name="images-outline" size={36} color={appTheme.color.textSecondary} />
+                <Text style={styles.galleryEmptyText}>No photos reported yet</Text>
+                <Text style={styles.galleryEmptySubtext}>Be the first to report this lot!</Text>
               </View>
-
-              <Text style={styles.detailsLine}>
-                General {lot.generalSpaces || 0} | Reserved {lot.reservedSpaces || 0} | Short-term {lot.shortTermSpaces || 0}
-              </Text>
-              <Text style={styles.detailsLine}>
-                Evening General {lot.eveningGeneralSpaces || 0} | Evening Short-term {lot.eveningShortTermSpaces || 0}
-              </Text>
-            </View>
+            ) : (
+              <ScrollView nestedScrollEnabled showsVerticalScrollIndicator={false}>
+                <View style={styles.galleryGrid}>
+                  {galleryPhotos.map((photo) => (
+                    <Pressable
+                      key={photo.id}
+                      onPress={() => setFullscreenPhoto(photo.photoUrl)}
+                      style={styles.galleryThumb}
+                    >
+                      <Image
+                        source={{ uri: photo.photoUrl }}
+                        style={styles.galleryImage}
+                        resizeMode="cover"
+                      />
+                    </Pressable>
+                  ))}
+                </View>
+              </ScrollView>
+            )}
           </View>
         </ScrollView>
       </View>
@@ -306,6 +340,14 @@ export default function LotBottomSheet({
           ) : null}
         </View>
       </View>
+
+      {fullscreenPhoto ? (
+        <Modal transparent visible={true} onRequestClose={() => setFullscreenPhoto(null)}>
+          <Pressable style={styles.fullscreenOverlay} onPress={() => setFullscreenPhoto(null)}>
+            <Image source={{ uri: fullscreenPhoto }} style={styles.fullscreenImage} resizeMode="contain" />
+          </Pressable>
+        </Modal>
+      ) : null}
     </View>
   );
 }
@@ -422,14 +464,13 @@ const styles = StyleSheet.create({
   primaryCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: appTheme.spacing.md,
-    padding: appTheme.spacing.md,
-    minHeight: 124,
+    gap: appTheme.spacing.xs,
+    padding: appTheme.spacing.xs,
     borderRadius: appTheme.radius.lg,
     borderWidth: 1,
     borderColor: appTheme.color.borderDefault,
     backgroundColor: appTheme.color.bgSurface,
-    marginBottom: appTheme.spacing.md,
+    marginBottom: appTheme.spacing.xs,
   },
   primaryCardMain: {
     flex: 1,
@@ -438,9 +479,9 @@ const styles = StyleSheet.create({
     gap: appTheme.spacing.md,
   },
   periodIconWrap: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'rgba(242, 201, 76, 0.12)',
@@ -462,21 +503,21 @@ const styles = StyleSheet.create({
   },
   primaryValue: {
     color: appTheme.color.textPrimary,
-    fontSize: 32,
+    fontSize: 26,
     fontWeight: '700',
-    lineHeight: 36,
+    lineHeight: 30,
   },
   primaryValueUnit: {
     color: appTheme.color.textPrimary,
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '600',
-    lineHeight: 24,
-    marginBottom: 2,
+    lineHeight: 20,
+    marginBottom: 1,
   },
   primaryCaption: {
     color: appTheme.color.textSecondary,
-    fontSize: 12,
-    marginTop: 2,
+    fontSize: 11,
+    marginTop: 1,
   },
   primaryPhotoWrap: {
     width: 128,
@@ -492,19 +533,19 @@ const styles = StyleSheet.create({
     height: '100%',
   },
   timelineSection: {
-    marginBottom: appTheme.spacing.md,
+    marginBottom: appTheme.spacing.xs,
   },
   timelineTitle: {
     color: appTheme.color.textPrimary,
     fontSize: 14,
     fontWeight: '600',
-    marginBottom: appTheme.spacing.xs,
+    marginBottom: 4,
   },
   timelineBars: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: 2,
-    height: 56,
+    height: 48,
     borderWidth: 1,
     borderColor: appTheme.color.borderDefault,
     borderRadius: appTheme.radius.sm,
@@ -594,7 +635,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   scoreSection: {
-    marginBottom: appTheme.spacing.sm,
+    marginBottom: appTheme.spacing.xs,
   },
   scoreHeadingRow: {
     flexDirection: 'row',
@@ -633,7 +674,7 @@ const styles = StyleSheet.create({
     transform: [{ translateX: -6 }],
   },
   scoreCaptionRow: {
-    marginTop: appTheme.spacing.xs,
+    marginTop: 2,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
@@ -677,5 +718,49 @@ const styles = StyleSheet.create({
     color: appTheme.color.textSecondary,
     fontSize: 12,
     lineHeight: 18,
+  },
+  galleryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    padding: appTheme.spacing.xs,
+  },
+  galleryThumb: {
+    width: '48%',
+    aspectRatio: 1,
+    borderRadius: appTheme.radius.sm,
+    overflow: 'hidden',
+    backgroundColor: appTheme.color.bgSurface,
+  },
+  galleryImage: {
+    width: '100%',
+    height: '100%',
+  },
+  galleryEmpty: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 40,
+    gap: 8,
+  },
+  galleryEmptyText: {
+    color: appTheme.color.textSecondary,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  galleryEmptySubtext: {
+    color: appTheme.color.textSecondary,
+    fontSize: 12,
+    opacity: 0.7,
+  },
+  fullscreenOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.9)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fullscreenImage: {
+    width: '90%',
+    height: '70%',
   },
 });
