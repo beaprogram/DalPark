@@ -122,7 +122,7 @@ export default function LotBottomSheet({
             {updatedText ? <Text style={styles.updatedText}>{updatedText}</Text> : null}
           </View>
           <Pressable accessibilityLabel="Close lot details" onPress={onClose} style={styles.closeButton}>
-            <Ionicons color={appTheme.color.textPrimary} name="close" size={18} />
+            <Ionicons color={appTheme.color.brandGold} name="close" size={18} />
           </Pressable>
         </View>
       </View>
@@ -392,14 +392,14 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   closeButton: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: appTheme.color.bgSurface,
-    borderWidth: 1,
-    borderColor: appTheme.color.borderDefault,
+    backgroundColor: 'rgba(242, 201, 76, 0.15)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(242, 201, 76, 0.4)',
   },
   pageDotRow: {
     flexDirection: 'row',
