@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Image, Modal, Pressable, RefreshControl, SectionList, StyleSheet, Text, View } from 'react-native';
+import { Alert, Image, Modal, Pressable, RefreshControl, ScrollView, SectionList, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -57,6 +57,8 @@ export default function HistoryScreen() {
   const [userVotes, setUserVotes] = useState({});
   const [pendingVotes, setPendingVotes] = useState({});
   const [currentUser, setCurrentUser] = useState(auth.currentUser);
+  const [filterLot, setFilterLot] = useState(null);
+  const [filterRating, setFilterRating] = useState(null);
 
   const pull = useCallback(async () => {
     try {
@@ -109,15 +111,36 @@ export default function HistoryScreen() {
     pull();
   }, [pull]);
 
+  const uniqueLots = useMemo(() => {
+    const lots = [...new Set(items.map((r) => r.lotName || r.lotId).filter(Boolean))];
+    return lots.sort();
+  }, [items]);
+
+  const ratingOptions = [
+    { label: 'Full', value: 1 },
+    { label: 'Busy', value: 2 },
+    { label: 'Moderate', value: 3 },
+    { label: 'Available', value: 4 },
+    { label: 'Empty', value: 5 },
+  ];
+
+  const filteredReports = useMemo(() => {
+    return items.filter((report) => {
+      if (filterLot && (report.lotName || report.lotId) !== filterLot) return false;
+      if (filterRating && report.rating !== filterRating) return false;
+      return true;
+    });
+  }, [items, filterLot, filterRating]);
+
   const sections = useMemo(() => {
     const cutoff = Date.now() - ONE_HR;
-    const recent = items.filter((r) => toTimestampMs(getReportCreatedAt(r)) > cutoff);
-    const past = items.filter((r) => toTimestampMs(getReportCreatedAt(r)) <= cutoff);
+    const recent = filteredReports.filter((r) => toTimestampMs(getReportCreatedAt(r)) > cutoff);
+    const past = filteredReports.filter((r) => toTimestampMs(getReportCreatedAt(r)) <= cutoff);
     const out = [];
     if (recent.length > 0) out.push({ title: 'Recent (Active)', data: recent });
     if (past.length > 0) out.push({ title: 'Past', data: past });
     return out;
-  }, [items]);
+  }, [filteredReports]);
 
   const handleVote = async (item, nextValue) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -287,6 +310,53 @@ export default function HistoryScreen() {
           </Text>
         </View>
       ) : (
+        <>
+        <View style={st.filterRow}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={st.filterScroll}>
+            <Pressable
+              onPress={() => setFilterLot(null)}
+              style={[st.filterChip, !filterLot && st.filterChipActive]}
+            >
+              <Text style={[st.filterChipText, !filterLot && st.filterChipTextActive]}>All Lots</Text>
+            </Pressable>
+            {uniqueLots.map((lot) => (
+              <Pressable
+                key={lot}
+                onPress={() => setFilterLot((prev) => prev === lot ? null : lot)}
+                style={[st.filterChip, filterLot === lot && st.filterChipActive]}
+              >
+                <Text style={[st.filterChipText, filterLot === lot && st.filterChipTextActive]}>{lot}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        </View>
+
+        <View style={st.filterRow}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={st.filterScroll}>
+            <Pressable
+              onPress={() => setFilterRating(null)}
+              style={[st.filterChip, !filterRating && st.filterChipActive]}
+            >
+              <Text style={[st.filterChipText, !filterRating && st.filterChipTextActive]}>All</Text>
+            </Pressable>
+            {ratingOptions.map((opt) => (
+              <Pressable
+                key={opt.value}
+                onPress={() => setFilterRating((prev) => prev === opt.value ? null : opt.value)}
+                style={[st.filterChip, filterRating === opt.value && st.filterChipActive]}
+              >
+                <Text style={[st.filterChipText, filterRating === opt.value && st.filterChipTextActive]}>{opt.label}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        </View>
+
+        {filteredReports.length === 0 && (filterLot || filterRating) ? (
+          <View style={{ alignItems: 'center', paddingVertical: 40 }}>
+            <Ionicons name="filter-outline" size={32} color={appTheme.color.textSecondary} />
+            <Text style={{ color: appTheme.color.textSecondary, marginTop: 8, fontSize: 14 }}>No reports match your filters</Text>
+          </View>
+        ) : (
         <SectionList
           sections={sections}
           keyExtractor={(i) => i.id}
@@ -310,6 +380,8 @@ export default function HistoryScreen() {
             />
           }
         />
+        )}
+        </>
       )}
 
       <Modal
@@ -327,6 +399,35 @@ export default function HistoryScreen() {
 }
 
 const st = StyleSheet.create({
+  filterRow: {
+    marginBottom: 6,
+  },
+  filterScroll: {
+    paddingHorizontal: 16,
+    gap: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  filterChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: appTheme.color.bgSurface,
+    borderWidth: 1,
+    borderColor: appTheme.color.borderDefault,
+  },
+  filterChipActive: {
+    backgroundColor: appTheme.color.brandGold,
+    borderColor: appTheme.color.brandGold,
+  },
+  filterChipText: {
+    color: appTheme.color.textSecondary,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  filterChipTextActive: {
+    color: appTheme.color.bgCanvas,
+  },
   wrap: {
     flex: 1,
     backgroundColor: appTheme.color.bgCanvas,

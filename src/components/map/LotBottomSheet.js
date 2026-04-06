@@ -96,10 +96,11 @@ export default function LotBottomSheet({
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const photos = snapshot.docs
         .map((doc) => ({ id: doc.id, ...doc.data() }))
-        .filter((report) => report.photoUrl);
+        .filter((report) => report.photoUrl && report.photoUrl.length > 0);
       setGalleryPhotos(photos);
       setGalleryLoading(false);
-    }, () => {
+    }, (error) => {
+      console.warn('Gallery query failed:', error);
       setGalleryLoading(false);
     });
     return unsubscribe;
