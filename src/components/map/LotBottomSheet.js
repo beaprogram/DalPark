@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Image, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Image, Modal, PanResponder, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
@@ -73,7 +73,30 @@ export default function LotBottomSheet({
   const [galleryPhotos, setGalleryPhotos] = useState([]);
   const [galleryLoading, setGalleryLoading] = useState(false);
   const [fullscreenPhoto, setFullscreenPhoto] = useState(null);
+  const [barContainerWidth, setBarContainerWidth] = useState(0);
+  const [hoveredHour, setHoveredHour] = useState(null);
   const pagerRef = useRef(null);
+  const barWidthRef = useRef(0);
+  const timelinePanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (e) => {
+        const slotW = barWidthRef.current / 24;
+        if (slotW <= 0) return;
+        const hour = Math.min(23, Math.max(0, Math.floor(e.nativeEvent.locationX / slotW)));
+        setHoveredHour(hour);
+      },
+      onPanResponderMove: (e) => {
+        const slotW = barWidthRef.current / 24;
+        if (slotW <= 0) return;
+        const hour = Math.min(23, Math.max(0, Math.floor(e.nativeEvent.locationX / slotW)));
+        setHoveredHour(hour);
+      },
+      onPanResponderRelease: () => setHoveredHour(null),
+      onPanResponderTerminate: () => setHoveredHour(null),
+    })
+  ).current;
 
   useEffect(() => {
     setActivePage(0);
@@ -244,45 +267,82 @@ export default function LotBottomSheet({
             {timelineScores.length > 0 ? (
               <View style={styles.timelineSection}>
                 <Text style={styles.timelineTitle}>Today</Text>
-                <View style={styles.timelineBars}>
-                  {normalizedTimelineScores.map((score, index) => (
-                    (() => {
+                <View style={{ position: 'relative', marginTop: 12, overflow: 'visible' }}>
+                  {barContainerWidth > 0 && (() => {
+                    const slotWidth = barContainerWidth / 24;
+                    const dotLeft = 4 + (currentTimelineHour * slotWidth) + (slotWidth / 2) - 4;
+                    return (
+                      <View style={{
+                        position: 'absolute',
+                        top: -9,
+                        left: dotLeft,
+                        width: 6,
+                        height: 6,
+                        borderRadius: 3,
+                        backgroundColor: '#FFFFFF',
+                        zIndex: 10,
+                      }} />
+                    );
+                  })()}
+                  <View
+                    style={styles.timelineBars}
+                    onLayout={(e) => {
+                      const w = e.nativeEvent.layout.width - 8;
+                      setBarContainerWidth(w);
+                      barWidthRef.current = w;
+                    }}
+                    {...timelinePanResponder.panHandlers}
+                  >
+                    {normalizedTimelineScores.map((score, index) => {
                       const isCurrentSlot = index === currentTimelineHour;
                       const isPastSlot = index < currentTimelineHour;
 
                       return (
-                    <View
-                      key={`timeline-${index}`}
-                      style={[
-                        styles.timelineSlot,
-                        isCurrentSlot && styles.timelineSlotCurrent,
-                        isPastSlot && styles.timelineSlotPast,
-                      ]}
-                    >
-                      <View
-                        style={[
-                          styles.timelineTrack,
-                          isCurrentSlot && styles.timelineTrackCurrent,
-                          isPastSlot && styles.timelineTrackPast,
-                          index === 7 && styles.timelinePhaseDivider,
-                          index === 17 && styles.timelinePhaseDivider,
-                        ]}
-                      />
-                      <View
-                        style={[
-                          styles.timelineBar,
-                          isCurrentSlot && styles.timelineBarCurrent,
-                          isPastSlot && styles.timelineBarPast,
-                          {
-                            height: getTimelineBarHeight(score, timelineMinScore, timelineRange),
-                            backgroundColor: scoreColor(score),
-                          },
-                        ]}
-                      />
-                    </View>
+                        <View
+                          key={`timeline-${index}`}
+                          style={[
+                            styles.timelineSlot,
+                            isPastSlot && styles.timelineSlotPast,
+                          ]}
+                        >
+                          {index === hoveredHour && (
+                            <View style={{
+                              position: 'absolute',
+                              top: -20,
+                              alignSelf: 'center',
+                              backgroundColor: 'rgba(0,0,0,0.55)',
+                              borderRadius: 4,
+                              paddingHorizontal: 3,
+                              paddingVertical: 1,
+                            }}>
+                              <Text style={{ color: '#FFFFFF', fontSize: 8, fontWeight: '700' }}>
+                                {String(index).padStart(2, '0')}:00
+                              </Text>
+                            </View>
+                          )}
+                          <View
+                            style={[
+                              styles.timelineTrack,
+                              isPastSlot && styles.timelineTrackPast,
+                              index === 7 && styles.timelinePhaseDivider,
+                              index === 17 && styles.timelinePhaseDivider,
+                            ]}
+                          />
+                          <View
+                            style={[
+                              styles.timelineBar,
+                              isPastSlot && styles.timelineBarPast,
+                              {
+                                height: getTimelineBarHeight(score, timelineMinScore, timelineRange),
+                                backgroundColor: scoreColor(score),
+                              },
+                              index === hoveredHour && { transform: [{ scaleY: 1.4 }] },
+                            ]}
+                          />
+                        </View>
                       );
-                    })()
-                  ))}
+                    })}
+                  </View>
                 </View>
                 <View style={styles.timelineLabelRow}>
                   <Text style={styles.timelineLabel}>00:00</Text>
