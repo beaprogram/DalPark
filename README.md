@@ -6,6 +6,14 @@ DalParkAid is a mobile app that helps Dalhousie students, staff, and visitors fi
 
 ---
 
+here are the links for android apks of our app both actual and test versions
+
+actual app: https://expo.dev/accounts/devangj/projects/DalParkAid/builds/1084933c-662e-46d0-8bc2-153be70cd5e3 
+
+test app: https://expo.dev/accounts/devangj/projects/DalParkAid/builds/808cdaba-5823-4309-a3f0-fa11e7ab1678 
+
+---
+
 ## Features
 
 ### Interactive Parking Map
