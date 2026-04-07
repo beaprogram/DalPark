@@ -20,10 +20,21 @@
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
-      }
+      },
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyCB7KfUZhRpmCDVchecWo-znUhqCB6qjIk"
+        }
+      },
+      "package": "com.devangj.DalParkAid"
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "84491e97-11a4-4c2c-ab51-d1e603bc0828"
+      }
     }
   }
 }
