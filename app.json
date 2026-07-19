@@ -23,7 +23,7 @@
       },
       "config": {
         "googleMaps": {
-          "apiKey": "AIzaSyCB7KfUZhRpmCDVchecWo-znUhqCB6qjIk"
+          "apiKey": ""
         }
       },
       "package": "com.devangj.DalParkAid"

@@ -1,239 +1,133 @@
 # DalParkAid
 
-**Smart parking for Dalhousie University**
+[![CI](https://github.com/beaprogram/DalPark/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/beaprogram/DalPark/actions/workflows/ci.yml)
 
-DalParkAid is a mobile app that helps Dalhousie students, staff, and visitors find the best parking spot on campus. It combines real-time crowdsourced reports, weather data, academic calendar signals, and a prediction engine to estimate lot availability across 28 Studley and Sexton campus parking lots.
+A React Native parking assistant for Dalhousie University's Studley and Sexton campuses. DalParkAid combines campus lot data, crowdsourced reports, weather, routing, and a custom scoring engine to help drivers compare likely parking availability.
 
----
+## Project status
 
-here are the links for android apks of our app both actual and test versions
+DalParkAid is a team course project on the `dev` default branch. The repository contains the Expo application and an Android export check; it does not include a hosted backend or a public production service. Firebase and Google Maps functionality require your own configured projects and restricted client keys.
 
-actual app: https://expo.dev/accounts/devangj/projects/DalParkAid/builds/1084933c-662e-46d0-8bc2-153be70cd5e3 
+## Implemented capabilities
 
-test app: https://expo.dev/accounts/devangj/projects/DalParkAid/builds/808cdaba-5823-4309-a3f0-fa11e7ab1678 
+- Map 28 campus parking lots with status colours and searchable filters.
+- Rank recommended, nearby, and likely-open lots.
+- Blend time, weather, academic-calendar, lot-capacity, and crowd reports in an availability score.
+- Submit proximity-checked reports with optional photos.
+- Browse and vote on community reports and view a contributor leaderboard.
+- Calculate alternate driving routes and provide in-app navigation cues.
+- Manage a Firebase-authenticated profile and the user's reports.
+- Fall back to bundled lot data when Firestore is unavailable.
 
----
+## Architecture
 
-## Features
+```mermaid
+flowchart LR
+    APP["Expo + React Native"] --> AUTH["Firebase Auth"]
+    APP --> FS[("Firestore")]
+    APP --> STORAGE["Firebase Storage"]
+    APP --> MAPS["Google Maps / Directions"]
+    APP --> WEATHER["Open-Meteo"]
 
-### Interactive Parking Map
-- 28 Dalhousie parking lots displayed with color-coded status markers (Empty → Full)
-- Real-time availability predictions powered by a custom scoring engine
-- Search and filter lots by name
-- Recommended, Nearest, and Most Open lot suggestions
-- Satellite / Standard map toggle
-- Live weather display with temperature and conditions
-
-### In-App Navigation
-- Turn-by-turn driving directions powered by Google Directions API
-- Multiple alternate route suggestions — tap to switch
-- Walking dots from your current location to the route start
-- Start / Center / End navigation controls
-- Step-by-step direction banner (e.g., "Turn right onto Queen St — 64 m")
-- Auto-arrival detection — navigation ends when you reach the lot
-- Destination pin marker at the parking lot
-
-### Lot Detail Bottom Sheet
-- **Slide 1:** Estimated available spots (day/evening), prediction score gradient (Full ↔ Empty), 24-hour predicted availability timeline
-- **Slide 2:** Global photo gallery — browse photos submitted by other users for that lot
-- Drag-to-dismiss with spring animation
-
-### Crowdsourced Reporting
-- Submit a busy-ness report (1–5 emoji scale) when within 30 meters of a lot
-- Attach a photo via camera or gallery — uploaded to Firebase Storage
-- Reports are weighted by freshness, photo proof, and community votes
-
-### Community & Gamification
-- **Community tab:** Browse all reports with upvote/downvote voting
-- **Leaderboard tab:** Users ranked by total reports submitted
-- Filter reports by lot name and by rating (Full / Busy / Moderate / Available / Empty)
-
-### User Profile
-- Edit display name, role, preferred campus, and about section
-- Upload a custom avatar photo
-- Manage and delete your own reports
-- Reset password via email
-
-### Additional
-- Animated splash screen on app launch
-- Haptic feedback on key interactions
-- Forgot Password on login screen
-- Graceful offline fallback — app works with bundled lot data if Firestore is unavailable
-
----
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Runtime | Expo SDK 54, React Native 0.81, React 19 |
-| Language | JavaScript (JSX) |
-| Navigation | React Navigation 7 (native-stack + bottom-tabs) |
-| Maps | react-native-maps (Google Maps) |
-| Auth / DB / Storage | Firebase JS SDK 12 (Auth, Firestore, Storage) |
-| Location | expo-location |
-| Camera | expo-image-picker |
-| Haptics | expo-haptics |
-| Routing | Google Directions API |
-| Weather | Open-Meteo API |
-| Icons | @expo/vector-icons (Ionicons, MaterialCommunityIcons) |
-
----
-
-## Prerequisites
-
-- [Node.js](https://nodejs.org/) (v18 or later recommended)
-- [Expo Go](https://expo.dev/client) app installed on your phone (Android or iOS)
-- Git
-
----
-
-## Getting Started
-
-### 1. Clone the repository
-
-```bash
-git clone https://git.cs.dal.ca/courses/2026-winter/csci-4176-5708/project-milestone-2/project-team-11/project-milestone-2.git
-cd project-milestone-2
+    SIGNALS["Dalhousie calendar sync"] --> BUNDLED["Bundled prediction signals"]
+    REPORTS["Crowd reports"] --> ENGINE["Availability scoring engine"]
+    WEATHER --> ENGINE
+    BUNDLED --> ENGINE
+    ENGINE --> APP
 ```
 
-### 2. Install dependencies
+## Technology
+
+| Area | Tools |
+|---|---|
+| Mobile | Expo SDK 54, React Native 0.81, React 19, JavaScript |
+| Navigation | React Navigation 7 |
+| Maps and routing | react-native-maps, Google Directions API |
+| Data and identity | Firebase Authentication, Firestore, Storage |
+| Device features | Expo Location, Image Picker, Haptics |
+| External data | Open-Meteo and a Dalhousie signal-sync script |
+
+## Local setup
+
+Requires Node.js 18+ and Expo Go or an Android/iOS development environment.
 
 ```bash
-npm install
-```
+git clone --branch dev https://github.com/beaprogram/DalPark.git
+cd DalPark
+npm ci
 
-### 3. Set up API keys
-
-Copy the example keys file:
-
-```bash
 cp src/config/keys.example.js src/config/keys.js
-```
+# Replace placeholders with restricted keys for your own projects.
 
-Open `src/config/keys.js` and fill in the real API keys (ask a team member for the values).
+cp .env.example .env
+# Set EXPO_PUBLIC_GOOGLE_MAPS_API_KEY for the native map configuration.
 
-### 4. Start the development server
-
-```bash
 npx expo start -c
 ```
 
-The `-c` flag clears the Metro bundler cache (recommended for clean starts).
+`src/config/keys.js` and `.env` are deliberately ignored. `app.config.js` reads the
+native map key from `EXPO_PUBLIC_GOOGLE_MAPS_API_KEY`. Do not force-add local
+configuration or paste keys into issues, screenshots, or documentation.
 
-### 5. Connect your device
+## Configuration
 
-- **Physical device:** Scan the QR code with Expo Go (Android) or Camera app (iOS). Ensure your phone and computer are on the same Wi-Fi network.
-- **Tunnel mode:** If same-network doesn't work, restart with `npx expo start -c --tunnel`.
-- **Android emulator:** Press `a` in the terminal (requires Android Studio with an AVD configured).
+Create the following client configuration locally:
 
----
-
-## Project Structure
-
-```
-project-milestone-2/
-├── App.js                              # Root component
-├── index.js                            # Entry point
-├── package.json                        # Dependencies and scripts
-├── app.json                            # Expo configuration
-├── babel.config.js                     # Babel + dotenv plugin
-├── storage.rules                       # Firebase Storage security rules
-├── .env.example                        # Environment variable template
-├── assets/                             # App icons, splash screen, logos
-├── scripts/
-│   └── syncOfficialPredictionSignals.mjs  # Dal.ca academic data scraper
-└── src/
-    ├── components/
-    │   ├── common/
-    │   │   ├── PrimaryButton.js         # Reusable gold button
-    │   │   └── SplashOverlay.js         # Animated launch screen
-    │   └── map/
-    │       ├── LotBottomSheet.js        # Lot detail sheet with gallery
-    │       └── ReportModal.js           # Crowdsource report modal
-    ├── config/
-    │   └── firebase.js                  # Firebase initialization
-    ├── constants/
-    │   └── statusStyle.js               # Status → color/label mapping
-    ├── data/
-    │   ├── parkingLots.js               # Local fallback lot data (28 lots)
-    │   └── officialPredictionSignals.js # Generated academic calendar + load data
-    ├── navigation/
-    │   └── AppNavigator.js              # Auth-gated stack + tab navigation
-    ├── screens/
-    │   ├── LoginScreen.js               # Email/password auth + forgot password
-    │   ├── MapScreen.js                 # Main map, navigation, predictions
-    │   ├── HistoryScreen.js             # Community reports + leaderboard
-    │   └── SettingsScreen.js            # Profile editor + report manager
-    ├── theme/
-    │   └── tokens.js                    # Design tokens (colors, spacing, typography)
-    └── utils/
-        ├── engine.js                    # Availability prediction engine
-        ├── routing.js                   # Google Directions API + fallback routing
-        ├── hrmApi.js                    # HRM parking zone data fetcher
-        ├── lotsFirestore.js             # Firestore lot subscription with fallback
-        ├── mapPreferencesStorage.js     # AsyncStorage persistence for map state
-        ├── navigation.js               # External maps deep link (fallback)
-        ├── predictionSignals.js         # Academic signal resolution
-        ├── reportVotes.js              # Upvote/downvote Firestore transactions
-        └── theme.js                     # Legacy theme (deprecated)
+```javascript
+export const KEYS = {
+  GOOGLE_MAPS_API_KEY: 'YOUR_RESTRICTED_GOOGLE_MAPS_KEY',
+  FIREBASE: {
+    apiKey: 'YOUR_FIREBASE_WEB_API_KEY',
+    authDomain: 'YOUR_PROJECT.firebaseapp.com',
+    projectId: 'YOUR_PROJECT_ID',
+    storageBucket: 'YOUR_PROJECT.firebasestorage.app',
+    messagingSenderId: 'YOUR_SENDER_ID',
+    appId: 'YOUR_APP_ID',
+  },
+};
 ```
 
----
+Restrict the Google key by application identifier and enabled API in Google Cloud. Configure Firebase Security Rules and App Check for any environment exposed beyond local development.
 
-## Firestore Collections
+## Prediction engine
 
-| Collection | Document ID | Purpose |
-|-----------|-------------|---------|
-| `lots` | lot slug (e.g., `studley-dalplex`) | Lot metadata, coordinates, capacity, status |
-| `reports` | auto-generated | Crowdsourced busy-ness reports with photos |
-| `reportVotes` | `{reportId}_{userId}` | One vote per user per report |
-| `userProfiles` | Firebase UID | Display name, avatar, role, campus preference |
-| `calendarSignals` | auto-generated | Live academic calendar overrides (optional) |
-| `campusLoadBuckets` | auto-generated | Live campus load overrides (optional) |
+`src/utils/engine.js` combines three groups of signals:
 
----
+1. Deterministic context such as hour, weekday, weather, lot type, campus load, and capacity.
+2. Recent reports weighted by age, photo evidence, user trust, and community votes.
+3. Historical reports from comparable weekday/hour windows.
 
-## Prediction Engine
+The output is an availability score mapped to human-readable lot states. It is an estimate, not an authoritative count of open spaces.
 
-The availability prediction engine (`src/utils/engine.js`) blends three signals:
+## Repository map
 
-1. **Deterministic engine score** — Based on hour-of-day, day-of-week, weather, lot type, academic calendar, campus load index, and lot capacity.
-2. **Crowdsourced reports** — Recent user reports within the last 90 minutes, weighted by freshness, photo proof, user trust, and community votes.
-3. **Historical patterns** — Matching reports from the same weekday and hour over the past 42 days.
+```text
+src/components/       Shared UI and map/report controls
+src/screens/          Login, map, community, and settings screens
+src/data/             Campus lots and generated signals
+src/utils/            Prediction, routing, weather, votes, and persistence helpers
+scripts/              Academic signal synchronization
+assets/               Icons and brand assets
+docs/screenshots/     Product capture checklist
+```
 
-Output: a 0–100 availability score mapped to status labels (Empty / Normal / Crowded / Almost Full / Full).
+## Available commands
 
----
+| Command | Purpose |
+|---|---|
+| `npm start` | Start Expo |
+| `npm run android` | Open the Android development target |
+| `npm run ios` | Open the iOS development target |
+| `npm run sync:signals` | Refresh bundled academic prediction signals |
 
-## Available Scripts
+GitHub Actions installs the locked dependencies and exports the Android JavaScript bundle with placeholder client configuration. This is a build check, not an end-to-end Firebase test.
 
-| Command | Description |
-|---------|-------------|
-| `npm start` | Start the Expo dev server |
-| `npm run android` | Start on Android |
-| `npm run ios` | Start on iOS |
-| `npm run web` | Start on web (limited — maps not supported) |
-| `npm run sync:signals` | Scrape Dal.ca and regenerate academic signal data |
+## Product evidence
 
----
+Follow [docs/screenshots/README.md](docs/screenshots/README.md) to add reviewed mobile screenshots. Use synthetic profiles and reports.
 
-## External APIs
+## Team and license
 
-| API | Purpose |
-|-----|---------|
-| [Google Directions API](https://developers.google.com/maps/documentation/directions) | In-app driving route calculation |
-| [Open-Meteo](https://open-meteo.com/) | Real-time weather data (free, no key required) |
-| [Firebase](https://firebase.google.com/) | Authentication, Firestore database, Cloud Storage |
+Developed by Project Team 11 for CSCI 4176/5708 Mobile Computing at Dalhousie University, Winter 2026.
 
----
-
-## Team
-
-**Project Team 11** — CSCI 4176/5708 Mobile Computing, Dalhousie University, Winter 2026
-
----
-
-## License
-
-This project was developed as part of the CSCI 4176/5708 course at Dalhousie University. All rights reserved.
+No open-source license has been selected. Until all contributors agree to one, the code remains copyrighted by its contributors.
