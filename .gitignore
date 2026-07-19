@@ -36,7 +36,7 @@ yarn-error.*
 *.log
 
 # API keys config (use keys.example.js as template)
-#src/config/keys.js
+src/config/keys.js
 
 # typescript
 *.tsbuildinfo
